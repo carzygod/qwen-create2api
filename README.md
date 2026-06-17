@@ -1,4 +1,4 @@
-# QIANWEN-CREATOR-01 / qianwen-creator2api
+# QIANWEN-CREATOR-01 / qwen-create2api
 
 `QIANWEN-CREATOR-01` is a standalone Web reverse-proxy provider for `create.qianwen.com`.
 
