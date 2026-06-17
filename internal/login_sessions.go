@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -10,6 +11,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	"image/png"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -573,6 +577,50 @@ func (s *LoginSession) Screenshot() []byte {
 	return out
 }
 
+func (s *LoginSession) QRPreview() []byte {
+	imageBytes := s.Screenshot()
+	if len(imageBytes) == 0 {
+		return nil
+	}
+	src, _, err := image.Decode(bytes.NewReader(imageBytes))
+	if err != nil {
+		return imageBytes
+	}
+	bounds := src.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+	if width < 400 || height < 300 {
+		return imageBytes
+	}
+	rect := image.Rect(
+		bounds.Min.X+int(float64(width)*0.54),
+		bounds.Min.Y+int(float64(height)*0.21),
+		bounds.Min.X+int(float64(width)*0.82),
+		bounds.Min.Y+int(float64(height)*0.66),
+	).Intersect(bounds)
+	if rect.Empty() {
+		return imageBytes
+	}
+	subImage, ok := src.(interface {
+		SubImage(r image.Rectangle) image.Image
+	})
+	if !ok {
+		return imageBytes
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, subImage.SubImage(rect)); err != nil {
+		return imageBytes
+	}
+	return out.Bytes()
+}
+
+func contentTypeForImage(imageBytes []byte) string {
+	if len(imageBytes) == 0 {
+		return "application/octet-stream"
+	}
+	return http.DetectContentType(imageBytes)
+}
+
 func (s *LoginSession) CaptureAccount() (*AccountRecord, error) {
 	s.mu.Lock()
 	ctx := s.ctx
@@ -975,7 +1023,19 @@ func handleLoginSessions(w http.ResponseWriter, r *http.Request, path string) {
 			writeAPIError(w, http.StatusNotFound, "screenshot_not_ready", "Screenshot is not ready yet.")
 			return
 		}
-		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Content-Type", contentTypeForImage(image))
+		_, _ = w.Write(image)
+	case "qr-preview":
+		if r.Method != http.MethodGet {
+			writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
+			return
+		}
+		image := session.QRPreview()
+		if len(image) == 0 {
+			writeAPIError(w, http.StatusNotFound, "screenshot_not_ready", "Screenshot is not ready yet.")
+			return
+		}
+		w.Header().Set("Content-Type", contentTypeForImage(image))
 		_, _ = w.Write(image)
 	case "refresh":
 		if r.Method != http.MethodPost {
@@ -1131,7 +1191,7 @@ func HandleAuthQR(w http.ResponseWriter, r *http.Request) {
 	for i := 0; i < 12; i++ {
 		image := session.Screenshot()
 		if len(image) > 0 {
-			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Content-Type", contentTypeForImage(image))
 			_, _ = w.Write(image)
 			return
 		}

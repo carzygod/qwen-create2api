@@ -77,7 +77,7 @@ textarea{resize:vertical;min-height:96px}input:focus,select:focus,textarea:focus
 .mono{font-family:"SFMono-Regular",Consolas,monospace;font-size:12px;word-break:break-all}.task-id{white-space:nowrap;word-break:normal;min-width:92px}.table-wrap{overflow:hidden}table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-size:12px;background:#070f19}tr:hover td{background:rgba(54,231,255,.025)}
 pre.out{max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#050b12;border:1px solid var(--line);border-radius:var(--radius-md);padding:14px;color:#adf5ff}
-.screenshot{width:100%;border-radius:var(--radius-md);border:1px solid var(--line-strong);background:#03070c;max-height:66vh;object-fit:contain}.qr-wrap{display:grid;gap:14px;place-items:center}.qr-img{width:100%;max-height:58vh;background:#050b12;border-radius:18px;border:1px solid var(--line-strong);object-fit:contain}.qr-img.interactive{cursor:crosshair}.login-input-row{width:100%;display:grid;grid-template-columns:1fr auto;gap:10px}.key-row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+.screenshot{width:100%;border-radius:var(--radius-md);border:1px solid var(--line-strong);background:#03070c;max-height:66vh;object-fit:contain}.qr-wrap{display:grid;gap:14px;place-items:center}.qr-images{width:100%;display:grid;grid-template-columns:minmax(220px,320px) 1fr;gap:14px;align-items:stretch}.qr-preview-img,.qr-img{width:100%;background:#050b12;border-radius:18px;border:1px solid var(--line-strong);object-fit:contain}.qr-preview-img{min-height:260px;max-height:390px;padding:10px;box-shadow:var(--glow)}.qr-img{max-height:48vh}.qr-img.interactive{cursor:crosshair}.login-input-row{width:100%;display:grid;grid-template-columns:1fr auto;gap:10px}.key-row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
 .overlay{position:fixed;inset:0;z-index:60;background:rgba(2,4,9,.72);backdrop-filter:blur(18px);display:grid;place-items:center;padding:24px;animation:fadeIn 180ms var(--ease)}
 .modal{width:min(840px,100%);background:linear-gradient(180deg,rgba(12,24,38,.98),rgba(5,11,18,.98));border:1px solid rgba(54,231,255,.24);border-radius:var(--radius-xl);box-shadow:var(--shadow),var(--glow);padding:22px;animation:modalUp 240ms var(--ease)}
 .modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:16px}@keyframes fadeIn{from{opacity:0}to{opacity:1}}@keyframes modalUp{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:none}}
@@ -85,7 +85,7 @@ pre.out{max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-wor
 .loading-ribbon{position:fixed;inset:0 0 auto;z-index:80;height:3px;overflow:hidden;background:rgba(54,231,255,.08)}.loading-ribbon span{display:block;width:42%;height:100%;background:linear-gradient(90deg,transparent,var(--cyan),var(--blue),var(--violet),transparent);box-shadow:0 0 18px rgba(54,231,255,.62);animation:loadingSweep 1.1s var(--ease) infinite}
 @keyframes loadingSweep{from{transform:translateX(-100%)}to{transform:translateX(240%)}}
 @media (max-width:1100px){.shell{grid-template-columns:1fr}.side{position:sticky;top:0;z-index:20;display:block;padding:14px}.brand{margin-bottom:12px}.nav{grid-template-columns:repeat(4,minmax(0,1fr))}.side-foot{display:none}.stats,.two{grid-template-columns:1fr}}
-@media (max-width:720px){.main{padding:18px 14px 32px}.topbar,.detail-head,.split{display:grid}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.form-grid{grid-template-columns:1fr}.nav{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:720px){.main{padding:18px 14px 32px}.topbar,.detail-head,.split{display:grid}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.form-grid,.qr-images{grid-template-columns:1fr}.nav{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 </head>
 <body>
@@ -226,7 +226,10 @@ pre.out{max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-wor
     <div class="modal">
       <div class="modal-head"><div><h2>扫码登录</h2><p class="subline">{{qr.name}} / {{qr.text}}</p></div><button class="btn ghost" @click="closeQr">关闭</button></div>
       <div class="qr-wrap">
-        <img v-if="qr.session_id" class="qr-img interactive" :src="screenshotUrl(qr.session_id)" alt="qianwen login screenshot" @click="clickSessionImage">
+        <div v-if="qr.session_id" class="qr-images">
+          <img class="qr-preview-img" :src="qrPreviewUrl(qr.session_id)" alt="qianwen login qr preview">
+          <img class="qr-img interactive" :src="screenshotUrl(qr.session_id)" alt="qianwen login screenshot" @click="clickSessionImage">
+        </div>
         <div v-else class="empty">正在启动登录浏览器</div>
         <span :class="['badge',qr.status]">{{statusText(qr.status || 'starting')}}</span>
         <p class="hint">如果页面没有二维码，可以直接点击上方截图中的输入框/按钮，再用下面的输入框把文字发送到服务器侧 Chromium。登录完成后点击“捕获并测活”。</p>
@@ -275,6 +278,7 @@ createApp({
       }finally{busy.value=false}
     }
     function screenshotUrl(id){return adminPath("/api/login-sessions/"+encodeURIComponent(id)+"/screenshot")+"&t="+Date.now()}
+    function qrPreviewUrl(id){return adminPath("/api/login-sessions/"+encodeURIComponent(id)+"/qr-preview")+"&t="+Date.now()}
     async function loadSummary(){Object.assign(summary,await api("/api/admin/summary"))}
     async function loadAccounts(){const data=await api("/api/accounts");accounts.value=data.data||[];if(!selectedId.value&&accounts.value.length)selectedId.value=accounts.value[0].id;if(selectedId.value&&!accounts.value.some(a=>a.id===selectedId.value))selectedId.value=accounts.value[0]?.id||""}
     async function loadSessions(){const data=await api("/api/login-sessions");sessions.value=data.data||[]}
@@ -383,7 +387,7 @@ createApp({
     function shortText(value,max){value=String(value||"");return value.length>max?value.slice(0,max-1)+"…":value}
     function statusText(v){const map={valid:"可用",unknown:"未测活",invalid:"不可用",starting:"启动中",opening:"打开中",waiting_scan:"等待扫码",login_detected:"检测到登录",captured:"已捕获",capture_failed:"捕获失败",failed:"失败",expired:"已过期"};return map[v]||v||"未知"}
     onMounted(()=>{refreshAll();setInterval(()=>{if(tab.value==="logs")loadTasks();loadSessions()},5000);setInterval(()=>loadAccounts(),15000)});
-    return{tabs,tab,title,busy,accounts,sessions,tasks,models,selectedId,selectedAccount,validCount,summary,addModal,newAccount,probe,qr,test,systemNote,refreshAll,loadAccounts,selectAccount,openAdd,createAccount,showSession,clickLoginEntry,clickSessionImage,typeIntoSession,pressSessionKey,refreshSession,captureSession,deleteSession,testAccount,runTest,copy,deleteAccount,closeQr,screenshotUrl,shortId,shortText,statusText};
+    return{tabs,tab,title,busy,accounts,sessions,tasks,models,selectedId,selectedAccount,validCount,summary,addModal,newAccount,probe,qr,test,systemNote,refreshAll,loadAccounts,selectAccount,openAdd,createAccount,showSession,clickLoginEntry,clickSessionImage,typeIntoSession,pressSessionKey,refreshSession,captureSession,deleteSession,testAccount,runTest,copy,deleteAccount,closeQr,screenshotUrl,qrPreviewUrl,shortId,shortText,statusText};
   }
 }).mount("#app");
 </script>
