@@ -74,7 +74,7 @@ h1,h2,h3,p{margin:0}h1{font-size:28px;line-height:1.12}h2{font-size:18px}h3{font
 input,select,textarea{width:100%;border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:rgba(5,11,18,.92);color:var(--text);padding:10px 12px;outline:none;transition:border-color 160ms var(--ease),box-shadow 160ms var(--ease),background 160ms var(--ease)}
 textarea{resize:vertical;min-height:96px}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(54,231,255,.12);background:#07111d}
 .kv{display:grid;grid-template-columns:130px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid rgba(41,64,87,.42);font-size:13px}.kv:last-child{border-bottom:0}.kv span:first-child{color:var(--muted)}
-.mono{font-family:"SFMono-Regular",Consolas,monospace;font-size:12px;word-break:break-all}.table-wrap{overflow:hidden}table{width:100%;border-collapse:collapse;font-size:13px}
+.mono{font-family:"SFMono-Regular",Consolas,monospace;font-size:12px;word-break:break-all}.task-id{white-space:nowrap;word-break:normal;min-width:92px}.table-wrap{overflow:hidden}table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-size:12px;background:#070f19}tr:hover td{background:rgba(54,231,255,.025)}
 pre.out{max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#050b12;border:1px solid var(--line);border-radius:var(--radius-md);padding:14px;color:#adf5ff}
 .screenshot{width:100%;border-radius:var(--radius-md);border:1px solid var(--line-strong);background:#03070c;max-height:66vh;object-fit:contain}.qr-wrap{display:grid;gap:14px;place-items:center}.qr-img{width:100%;max-height:58vh;background:#050b12;border-radius:18px;border:1px solid var(--line-strong);object-fit:contain}.qr-img.interactive{cursor:crosshair}.login-input-row{width:100%;display:grid;grid-template-columns:1fr auto;gap:10px}.key-row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
@@ -139,19 +139,56 @@ pre.out{max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-wor
           </div>
           <div class="card" v-else><div class="empty">请选择一个账号查看详情。</div></div>
         </div>
-      </section>
 
-      <section v-show="tab==='sessions'" class="tab-panel">
-        <div class="table-wrap">
-          <table><thead><tr><th>会话</th><th>状态</th><th>Cookies</th><th>消息</th><th>操作</th></tr></thead>
-          <tbody>
-            <tr v-for="s in sessions" :key="s.id"><td><div class="mono">{{s.name}}</div><div class="hint mono">{{s.id}}</div></td><td><span :class="['badge',s.status]">{{statusText(s.status)}}</span></td><td>{{s.cookie_count}}</td><td>{{s.message}}</td><td><div class="actions"><button class="btn" @click="showSession(s.id)">打开</button><button class="btn" @click="refreshSession(s.id)">刷新</button><button class="btn primary" @click="captureSession(s.id)">捕获并测活</button><button class="btn danger" @click="deleteSession(s.id)">删除</button></div></td></tr>
-            <tr v-if="!sessions.length"><td colspan="5" class="empty">暂无登录会话。</td></tr>
-          </tbody></table>
+        <div class="grid two" style="margin-top:16px">
+          <div class="card">
+            <div class="split" style="margin-bottom:14px"><h2>扫码会话</h2><button class="btn ghost" @click="loadSessions">同步状态</button></div>
+            <div class="table-wrap">
+              <table><thead><tr><th>会话</th><th>状态</th><th>Cookies</th><th>消息</th><th>操作</th></tr></thead>
+              <tbody>
+                <tr v-for="s in sessions" :key="s.id"><td><div class="mono">{{s.name}}</div><div class="hint mono">{{s.id}}</div></td><td><span :class="['badge',s.status]">{{statusText(s.status)}}</span></td><td>{{s.cookie_count}}</td><td>{{s.message}}</td><td><div class="actions"><button class="btn" @click="showSession(s.id)">打开</button><button class="btn" @click="refreshSession(s.id)">刷新</button><button class="btn primary" @click="captureSession(s.id)">捕获并测活</button><button class="btn danger" @click="deleteSession(s.id)">删除</button></div></td></tr>
+                <tr v-if="!sessions.length"><td colspan="5" class="empty">暂无登录会话。</td></tr>
+              </tbody></table>
+            </div>
+          </div>
+          <div class="card">
+            <div class="split" style="margin-bottom:14px"><h2>最近任务</h2><button class="btn ghost" @click="loadTasks">刷新任务</button></div>
+            <div class="table-wrap">
+              <table><thead><tr><th>ID</th><th>模型</th><th>状态</th><th>错误</th></tr></thead>
+              <tbody><tr v-for="task in tasks.slice(0,6)" :key="task.id"><td class="mono task-id" :title="task.id">{{shortId(task.id)}}</td><td>{{task.model}}</td><td><span :class="['badge',task.status]">{{task.status}}</span></td><td :title="task.error_message || ''">{{shortText(task.error_message || '-',72)}}</td></tr><tr v-if="!tasks.length"><td colspan="4" class="empty">暂无任务。</td></tr></tbody></table>
+            </div>
+          </div>
         </div>
       </section>
 
-      <section v-show="tab==='tasks'" class="tab-panel">
+      <section v-show="tab==='test'" class="tab-panel">
+        <div class="card">
+          <div class="form-grid">
+            <label>账号
+              <select v-model="test.account_id">
+                <option value="">选择账号后测活</option>
+                <option v-for="a in accounts" :key="a.id" :value="a.id">{{a.name}} / {{a.id}}</option>
+              </select>
+            </label>
+            <label>模型
+              <select v-model="test.model">
+                <option v-for="m in models" :key="m.id || m.name" :value="m.id || m.name">{{m.id || m.name}}</option>
+              </select>
+            </label>
+          </div>
+          <label style="margin-top:12px">Prompt
+            <textarea v-model="test.prompt" placeholder="输入用于测试的内容。账号测活会请求默认模型并取得真实返回后才算成功。"></textarea>
+          </label>
+          <div class="actions" style="margin-top:14px">
+            <button class="btn primary" :disabled="test.loading" @click="runTest">{{test.loading?'请求中':'发送测试'}}</button>
+            <button class="btn" @click="copy(test.output)">复制结果</button>
+          </div>
+          <pre v-if="test.output" class="out" style="margin-top:14px">{{test.output}}</pre>
+          <div v-if="test.error" class="card" style="margin-top:14px;border-color:rgba(255,102,117,.35);color:var(--red)">{{test.error}}</div>
+        </div>
+      </section>
+
+      <section v-show="tab==='logs'" class="tab-panel">
         <div class="table-wrap">
           <table><thead><tr><th>ID</th><th>模型</th><th>状态</th><th>账号</th><th>错误</th><th>创建时间</th></tr></thead>
           <tbody><tr v-for="task in tasks" :key="task.id"><td class="mono">{{task.id}}</td><td>{{task.model}}</td><td><span :class="['badge',task.status]">{{task.status}}</span></td><td class="mono">{{task.provider_account_id || '-'}}</td><td>{{task.error_message || '-'}}</td><td>{{task.created_at}}</td></tr><tr v-if="!tasks.length"><td colspan="6" class="empty">暂无任务。</td></tr></tbody></table>
@@ -214,12 +251,13 @@ createApp({
   setup(){
     const API=window.location.origin;
     const adminKey=new URLSearchParams(window.location.search).get("key")||"";
-    const tabs=[{key:"accounts",name:"账号池",icon:"◎"},{key:"sessions",name:"扫码会话",icon:"▣"},{key:"tasks",name:"任务",icon:"≡"},{key:"system",name:"系统",icon:"⚙"}];
+    const tabs=[{key:"accounts",name:"账号池",icon:"◎"},{key:"test",name:"接口测试",icon:"↯"},{key:"logs",name:"请求日志",icon:"≡"},{key:"system",name:"系统",icon:"⚙"}];
     const tab=ref("accounts"),busy=ref(false),accounts=ref([]),sessions=ref([]),tasks=ref([]),models=ref([]),selectedId=ref("");
     const summary=reactive({service:{},accounts:{},tasks:{}});
     const addModal=ref(false),newAccount=reactive({name:"",mode:"browser",cookie_string:"",cookie_json:"",local_storage_json:"",user_agent:""});
     const probe=reactive({loading:false,status:"",message:""});
     const qr=reactive({open:false,session_id:"",name:"",status:"",text:"",input:"",timer:null});
+    const test=reactive({account_id:"",model:"",prompt:"你好，请只回复一句话确认你可用。",output:"",error:"",loading:false});
     const systemNote=ref("公网图片 URL 自动转素材当前不计入稳定能力；稳定图生视频路径是 first_frame_material_id / last_frame_material_id。");
     const title=computed(()=>tabs.find(t=>t.key===tab.value)?.name||"账号池");
     const selectedAccount=computed(()=>accounts.value.find(a=>a.id===selectedId.value)||null);
@@ -241,7 +279,7 @@ createApp({
     async function loadAccounts(){const data=await api("/api/accounts");accounts.value=data.data||[];if(!selectedId.value&&accounts.value.length)selectedId.value=accounts.value[0].id;if(selectedId.value&&!accounts.value.some(a=>a.id===selectedId.value))selectedId.value=accounts.value[0]?.id||""}
     async function loadSessions(){const data=await api("/api/login-sessions");sessions.value=data.data||[]}
     async function loadTasks(){const data=await api("/api/tasks?limit=100");tasks.value=data.data||[]}
-    async function loadModels(){try{models.value=(await api("/api/models")).data||[]}catch(e){models.value=[]}}
+    async function loadModels(){try{models.value=(await api("/api/models")).data||[];if(!test.model&&models.value.length)test.model=models.value[0].id||models.value[0].name||""}catch(e){models.value=[]}}
     async function refreshAll(){await Promise.all([loadSummary(),loadAccounts(),loadSessions(),loadTasks(),loadModels()])}
     function selectAccount(id){selectedId.value=id;probe.message=""}
     function openAdd(){newAccount.name="";newAccount.mode="browser";newAccount.cookie_string="";newAccount.cookie_json="";newAccount.local_storage_json="";newAccount.user_agent="";addModal.value=true}
@@ -324,10 +362,28 @@ createApp({
       }catch(e){probe.status="error";probe.message=e.message}
       finally{probe.loading=false;await loadAccounts()}
     }
+    async function runTest(){
+      test.output="";test.error="";
+      if(!test.account_id){test.error="请先选择一个账号。账号池为空时不能进行真实模型测活。";return}
+      test.loading=true;
+      try{
+        const result=await api("/api/accounts/"+encodeURIComponent(test.account_id)+"/test",{method:"POST",body:JSON.stringify({capability:"chat",prompt:test.prompt,model:test.model})});
+        test.output=JSON.stringify(result,null,2);
+      }catch(e){test.error=e.message}
+      finally{test.loading=false;await loadAccounts()}
+    }
+    async function copy(value){
+      if(!value)return;
+      try{await navigator.clipboard.writeText(value)}catch(e){
+        const ta=document.createElement("textarea");ta.value=value;document.body.appendChild(ta);ta.select();document.execCommand("copy");ta.remove();
+      }
+    }
     async function deleteAccount(id){if(!confirm("删除这个账号？"))return;await api("/api/accounts/"+encodeURIComponent(id),{method:"DELETE"});selectedId.value="";await loadAccounts()}
+    function shortId(value){value=String(value||"");return value.length>13?value.slice(0,8)+"…"+value.slice(-4):value}
+    function shortText(value,max){value=String(value||"");return value.length>max?value.slice(0,max-1)+"…":value}
     function statusText(v){const map={valid:"可用",unknown:"未测活",invalid:"不可用",starting:"启动中",opening:"打开中",waiting_scan:"等待扫码",login_detected:"检测到登录",captured:"已捕获",capture_failed:"捕获失败",failed:"失败",expired:"已过期"};return map[v]||v||"未知"}
-    onMounted(()=>{refreshAll();setInterval(()=>{if(tab.value==="tasks")loadTasks();if(tab.value==="sessions")loadSessions()},5000);setInterval(()=>loadAccounts(),15000)});
-    return{tabs,tab,title,busy,accounts,sessions,tasks,models,selectedId,selectedAccount,validCount,summary,addModal,newAccount,probe,qr,systemNote,refreshAll,loadAccounts,selectAccount,openAdd,createAccount,showSession,clickLoginEntry,clickSessionImage,typeIntoSession,pressSessionKey,refreshSession,captureSession,deleteSession,testAccount,deleteAccount,closeQr,screenshotUrl,statusText};
+    onMounted(()=>{refreshAll();setInterval(()=>{if(tab.value==="logs")loadTasks();loadSessions()},5000);setInterval(()=>loadAccounts(),15000)});
+    return{tabs,tab,title,busy,accounts,sessions,tasks,models,selectedId,selectedAccount,validCount,summary,addModal,newAccount,probe,qr,test,systemNote,refreshAll,loadAccounts,selectAccount,openAdd,createAccount,showSession,clickLoginEntry,clickSessionImage,typeIntoSession,pressSessionKey,refreshSession,captureSession,deleteSession,testAccount,runTest,copy,deleteAccount,closeQr,screenshotUrl,shortId,shortText,statusText};
   }
 }).mount("#app");
 </script>
