@@ -19,12 +19,12 @@ This project does not use official Qwen API keys. It stores logged-in Web sessio
 | Async video task API | Implemented |
 | Text-to-video | Historically verified on SH01 with `qianwen-creator-wan25-t2v`; requires a current `valid` account |
 | First-frame video | Historically verified on SH01 with `first_frame_material_id` and `qianwen-creator-wan25-i2v`; requires a current `valid` account |
-| First+last-frame video | Implemented at request-wrapper level |
-| Public image URL to material id | Observed but not production-usable yet; direct restore currently fails upstream with `code=10009` signature verification |
-| Base64/binary upload | Reserved; requires full OSS upload-flow capture under a logged-in account |
+| First+last-frame video | Verified on SH01 with `qianwen-creator-wan22-flash-frame`, public first/last image URLs, and 720P 5s output |
+| Public image URL to material id | Implemented through the observed Creator OSS upload flow: `/1/oss_token` -> OSS `PUT` -> `/1/oss/callback` |
+| Data URI image upload | Implemented for `data:image/...;base64,...` values |
 | Creator image generation | Not exposed in `/v1/models` yet |
 
-Important: the Creator Web app uses client-side signing/encryption helpers before calling AI Studio endpoints. This repository packages the observed endpoint shape and headers, but production validation must be performed with a real logged-in account. If direct HTTP is rejected by upstream signing checks, the next step is to enable a browser-executor mode that submits through the loaded Creator page runtime.
+Important: the Creator Web app uses client-side signing helpers before calling AI Studio endpoints. This repository implements the observed direct HTTP signing path for both video submit/query and Creator Resource image upload. Production validation still requires a current logged-in Creator Web account.
 
 ## Models
 
@@ -54,8 +54,8 @@ curl -X POST "$BASE_URL/v1/video/generations" \
     "duration": 5,
     "resolution": "720P",
     "aspect_ratio": "9:16",
-    "first_frame_material_id": "creator-material-id-for-first-frame",
-    "last_frame_material_id": "creator-material-id-for-last-frame"
+    "first_frame_image": "https://example.com/first-frame.png",
+    "last_frame_image": "https://example.com/last-frame.png"
   }'
 ```
 
@@ -91,17 +91,18 @@ curl -X POST "$BASE_URL/v1/video/generations/sync" \
     "duration": 5,
     "resolution": "720P",
     "aspect_ratio": "9:16",
-    "first_frame_material_id": "creator-material-id-for-first-frame",
-    "last_frame_material_id": "creator-material-id-for-last-frame"
+    "first_frame_image": "https://example.com/first-frame.png",
+    "last_frame_image": "https://example.com/last-frame.png"
   }'
 ```
 
 `first_frame_image` and `last_frame_image` accept:
 
 - Creator material ids.
-- Public image URLs are attempted through `/1/material/file_url/restore`, but this path is not considered stable yet because the upstream Resource service currently rejects cookie-only direct requests with `code=10009`.
+- Public image URLs. The service downloads the image and uploads it to Creator Resource using the observed OSS flow before submitting the video task.
+- Data URI values such as `data:image/png;base64,...`.
 
-For the validated path, pass `first_frame_material_id` and `last_frame_material_id`.
+`first_frame_material_id` and `last_frame_material_id` remain supported for callers that already have Creator material ids.
 
 ## Admin
 
@@ -167,12 +168,13 @@ Observed video query:
 - Path: `POST /api/web/ai/video/record/query`
 - Body: `{ "recordId": "...", "scene": "..." }`
 
-Observed URL material restore:
+Observed image material upload:
 
-- Base: `https://aistudio-resource.quark.cn`
-- Path: `POST /1/material/file_url/restore`
-- Body: `{ "entry": "image_refer", "file_name": "...", "url": "..." }`
-- Current validation result: direct HTTP restore with the captured Web cookie returns `code=10009` signature verification failure. The service keeps this path as best-effort, but NewAPI/channel integrations should use Creator material ids until a full browser/OSS upload flow is implemented.
+- Base: `https://aistudio-resource.qianwen.com`
+- Step 1: `POST /1/oss_token` with file name, MD5, size, file type, and `entry=ugc`.
+- Step 2: `PUT` the image bytes to the returned OSS host/object with the returned OSS authorization headers.
+- Step 3: `POST /1/oss/callback` with object, bucket, MD5, file type, and endpoint. The response returns `material_id`.
+- The old `/1/material/file_url/restore` path is not used because direct HTTP restore returns upstream `code=10009` signature verification failures.
 
 Observed first+last frame payload shape:
 
@@ -203,7 +205,7 @@ Observed first+last frame payload shape:
 Validated on `http://150.158.144.62:18012`:
 
 - 2026-06-17 login regression: Admin loads, new-account flow opens a readable QR login screenshot by default, screenshot-click API works, and historical false-captured visitor accounts were removed.
-- Current account pool is intentionally empty. Add a Creator account and run account test until it is marked `valid` before routing traffic.
+- SH01 currently has a valid Creator login account. For new deployments, add a Creator account and run account test until it is marked `valid` before routing traffic.
 - Historical: `qianwen-creator-wan25-t2v` text-to-video completed and returned a playable video URL.
 - Historical: `qianwen-creator-wan25-i2v` first-frame image-to-video completed when using an existing Creator material id.
-- Public image URL restore is not counted as usable yet because the Resource endpoint returns `code=10009`.
+- 2026-06-18: `qianwen-creator-wan22-flash-frame` first+last-frame video completed using two public image URLs. The service uploaded both images through Creator OSS and returned a playable mp4.

@@ -261,7 +261,7 @@ createApp({
     const probe=reactive({loading:false,status:"",message:""});
     const qr=reactive({open:false,session_id:"",name:"",status:"",text:"",input:"",timer:null});
     const test=reactive({account_id:"",model:"",prompt:"你好，请只回复一句话确认你可用。",output:"",error:"",loading:false});
-    const systemNote=ref("公网图片 URL 自动转素材当前不计入稳定能力；稳定图生视频路径是 first_frame_material_id / last_frame_material_id。");
+    const systemNote=ref("first_frame_image / last_frame_image 支持公网图片 URL 与 data URI 自动上传为 Creator 素材；也可直接传 first_frame_material_id / last_frame_material_id。");
     const title=computed(()=>tabs.find(t=>t.key===tab.value)?.name||"账号池");
     const selectedAccount=computed(()=>accounts.value.find(a=>a.id===selectedId.value)||null);
     const validCount=computed(()=>accounts.value.filter(a=>a.status==="valid").length);
