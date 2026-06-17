@@ -3,12 +3,18 @@ package internal
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html"
 	"io"
+	"mime"
 	"net/http"
+	"net/url"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,7 +25,7 @@ const (
 	qwenCreatorPageURL     = "https://create.qianwen.com/r/ai-studio-pc/main/gen-video"
 	qwenCreatorOrigin      = "https://create.qianwen.com"
 	qwenCreatorAPIBaseURL  = "https://ai-studio-create.qianwen.com"
-	qwenCreatorResourceURL = "https://aistudio-resource.quark.cn"
+	qwenCreatorResourceURL = "https://aistudio-resource.qianwen.com"
 )
 
 type qwenCookie struct {
@@ -40,6 +46,21 @@ type qwenWebClient struct {
 	xsrfToken    string
 	deviceID     string
 	userAgent    string
+	resourceAuth *creatorResourceAuth
+}
+
+type creatorResourceAuth struct {
+	Dvidn  string
+	Actkn  string
+	Snver  string
+	Bacsft []string
+}
+
+type creatorImageBlob struct {
+	Bytes       []byte
+	ContentType string
+	FileName    string
+	FileType    string
 }
 
 type qwenWebEvent struct {
@@ -272,34 +293,448 @@ func (c *qwenWebClient) resolveCreatorMaterialID(ctx context.Context, explicitMa
 		return imageValue, nil
 	}
 	lower := strings.ToLower(imageValue)
-	if strings.HasPrefix(lower, "data:") {
-		return "", fmt.Errorf("base64 image upload requires the OSS upload flow; pass an existing Creator material id or public image URL for now")
+	if strings.HasPrefix(lower, "data:") || strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		blob, err := c.loadCreatorImageBlob(ctx, imageValue)
+		if err != nil {
+			return "", err
+		}
+		return c.uploadCreatorImageBlob(ctx, blob)
 	}
-	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-		return "", fmt.Errorf("unsupported image value; pass a material id or public image URL")
+	return "", fmt.Errorf("unsupported image value; pass a material id, public image URL, or data URI")
+}
+
+func (c *qwenWebClient) loadCreatorImageBlob(ctx context.Context, imageValue string) (*creatorImageBlob, error) {
+	if strings.HasPrefix(strings.ToLower(imageValue), "data:") {
+		return decodeCreatorDataURI(imageValue)
 	}
-	payload := map[string]interface{}{
-		"entry":     "image_refer",
-		"file_name": fmt.Sprintf("%d", time.Now().UnixMilli()),
-		"url":       imageValue,
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageValue, nil)
+	if err != nil {
+		return nil, err
 	}
-	resp, err := c.postCreatorJSON(ctx, qwenCreatorResourceURL, "/1/material/file_url/restore", payload)
+	req.Header.Set("User-Agent", c.userAgent)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download image failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("download image status %d: %s", resp.StatusCode, string(body))
+	}
+	body, err := readLimited(resp.Body, 20*1024*1024)
+	if err != nil {
+		return nil, err
+	}
+	contentType := normalizeImageContentType(resp.Header.Get("Content-Type"), body)
+	if !strings.HasPrefix(contentType, "image/") {
+		return nil, fmt.Errorf("downloaded URL is not an image: %s", contentType)
+	}
+	fileName := creatorFileNameFromURL(imageValue, contentType)
+	return &creatorImageBlob{
+		Bytes:       body,
+		ContentType: contentType,
+		FileName:    fileName,
+		FileType:    contentType,
+	}, nil
+}
+
+func decodeCreatorDataURI(value string) (*creatorImageBlob, error) {
+	parts := strings.SplitN(value, ",", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid data URI")
+	}
+	meta := strings.TrimPrefix(parts[0], "data:")
+	isBase64 := strings.Contains(strings.ToLower(meta), ";base64")
+	contentType := strings.Split(meta, ";")[0]
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	var raw []byte
+	var err error
+	if isBase64 {
+		raw, err = base64.StdEncoding.DecodeString(parts[1])
+	} else {
+		var decoded string
+		decoded, err = url.PathUnescape(parts[1])
+		raw = []byte(decoded)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("decode data URI failed: %w", err)
+	}
+	contentType = normalizeImageContentType(contentType, raw)
+	if !strings.HasPrefix(contentType, "image/") {
+		return nil, fmt.Errorf("data URI is not an image: %s", contentType)
+	}
+	return &creatorImageBlob{
+		Bytes:       raw,
+		ContentType: contentType,
+		FileName:    "upload" + creatorExtFromContentType(contentType),
+		FileType:    contentType,
+	}, nil
+}
+
+func (c *qwenWebClient) uploadCreatorImageBlob(ctx context.Context, blob *creatorImageBlob) (string, error) {
+	if blob == nil || len(blob.Bytes) == 0 {
+		return "", fmt.Errorf("empty image payload")
+	}
+	sum := md5.Sum(blob.Bytes)
+	md5Base64 := base64.StdEncoding.EncodeToString(sum[:])
+	fileType := blob.FileType
+	if fileType == "" {
+		fileType = blob.ContentType
+	}
+	tokenPayload := map[string]interface{}{
+		"file_name":    blob.FileName,
+		"content_type": "application/octet-stream",
+		"content_md5":  md5Base64,
+		"size":         strconv.Itoa(len(blob.Bytes)),
+		"file_type":    fileType,
+		"entry":        "ugc",
+	}
+	tokenResp, err := c.postCreatorResourceJSON(ctx, "/1/oss_token", tokenPayload, generateChid())
 	if err != nil {
 		return "", err
 	}
-	if code := intFromAny(resp["code"]); code != 0 {
-		return "", fmt.Errorf("Creator material restore failed: code=%d msg=%s; pass first_frame_material_id/last_frame_material_id until the Creator Resource signing flow is implemented", code, stringFromAny(resp["msg"]))
+	if code := intFromAny(tokenResp["code"]); code != 0 {
+		return "", fmt.Errorf("Creator OSS token failed: code=%d msg=%s", code, stringFromAny(tokenResp["msg"]))
 	}
-	data := mapFromAny(resp["data"])
+	tokenData := mapFromAny(tokenResp["data"])
+	if err := c.putCreatorOSSObject(ctx, tokenData, blob, md5Base64); err != nil {
+		return "", err
+	}
+	objectName := stringFromAny(tokenData["object"])
+	bucket := stringFromAny(tokenData["bucket"])
+	endpoint := stringFromAny(tokenData["endpoint"])
+	if objectName == "" || bucket == "" || endpoint == "" {
+		return "", fmt.Errorf("Creator OSS token response missing object/bucket/endpoint")
+	}
+	payload := map[string]interface{}{
+		"object":    objectName,
+		"bucket":    bucket,
+		"file_name": blob.FileName,
+		"file_md5":  md5Base64,
+		"file_type": creatorCallbackFileType(blob.FileName, blob.ContentType),
+		"entry":     "ugc",
+		"endpoint":  endpoint,
+	}
+	callbackResp, err := c.postCreatorResourceJSON(ctx, "/1/oss/callback", payload, generateChid())
+	if err != nil {
+		return "", err
+	}
+	if code := intFromAny(callbackResp["code"]); code != 0 {
+		return "", fmt.Errorf("Creator OSS callback failed: code=%d msg=%s", code, stringFromAny(callbackResp["msg"]))
+	}
+	data := mapFromAny(callbackResp["data"])
 	materialID := firstNonEmptyString(
 		stringFromAny(data["material_id"]),
 		stringFromAny(data["materialId"]),
 		stringFromAny(data["id"]),
 	)
 	if materialID == "" {
-		return "", fmt.Errorf("Creator material restore returned no material_id")
+		return "", fmt.Errorf("Creator OSS callback returned no material_id")
 	}
 	return materialID, nil
+}
+
+func (c *qwenWebClient) putCreatorOSSObject(ctx context.Context, tokenData map[string]interface{}, blob *creatorImageBlob, md5Base64 string) error {
+	host := stringFromAny(tokenData["host"])
+	objectName := stringFromAny(tokenData["object"])
+	authorization := stringFromAny(tokenData["authorization"])
+	if host == "" || objectName == "" || authorization == "" {
+		return fmt.Errorf("Creator OSS token response missing host/object/authorization")
+	}
+	reqID := generateChid()
+	putURL := fmt.Sprintf("%s/%s?%s", strings.TrimRight(host, "/"), url.PathEscape(objectName), creatorResourceQuery(reqID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, putURL, bytes.NewReader(blob.Bytes))
+	if err != nil {
+		return err
+	}
+	contentType := firstNonEmptyString(stringFromAny(tokenData["content_type"]), "application/octet-stream")
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Origin", qwenCreatorOrigin)
+	req.Header.Set("Referer", qwenCreatorOrigin+"/")
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Content-MD5", md5Base64)
+	req.Header.Set("Authorization", authorization)
+	for _, h := range sliceFromAny(tokenData["oss_headers"]) {
+		item := mapFromAny(h)
+		key := stringFromAny(item["key"])
+		value := stringFromAny(item["value"])
+		if key != "" {
+			req.Header.Set(key, value)
+		}
+	}
+	if err := c.setCreatorResourceSecurityHeaders(ctx, req, reqID); err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("Creator OSS put failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("Creator OSS put status %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+func (c *qwenWebClient) postCreatorResourceJSON(ctx context.Context, path string, payload map[string]interface{}, reqID string) (map[string]interface{}, error) {
+	body, _ := json.Marshal(payload)
+	reqURL := fmt.Sprintf("%s%s?%s", strings.TrimRight(qwenCreatorResourceURL, "/"), path, creatorResourceQuery(reqID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Origin", qwenCreatorOrigin)
+	req.Header.Set("Referer", qwenCreatorOrigin+"/")
+	req.Header.Set("Cookie", c.cookieHeader)
+	if err := c.setCreatorResourceSecurityHeaders(ctx, req, reqID); err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("Qianwen Creator Resource status %d: %s", resp.StatusCode, string(raw))
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse Qianwen Creator Resource response: %w; body=%s", err, string(raw))
+	}
+	return result, nil
+}
+
+func creatorResourceQuery(reqID string) string {
+	values := url.Values{}
+	values.Set("biz_id", "ai_image")
+	values.Set("req_id", reqID)
+	values.Set("uc_param_str", "vesvutkpfrcgprospc")
+	values.Set("pr", "kkpcweb")
+	values.Set("fr", "win")
+	return values.Encode()
+}
+
+func (c *qwenWebClient) setCreatorResourceSecurityHeaders(ctx context.Context, req *http.Request, reqID string) error {
+	auth, err := c.ensureCreatorResourceAuth(ctx)
+	if err != nil {
+		return err
+	}
+	sacsft, ok := auth.consumeBacsft()
+	if !ok {
+		c.resourceAuth = nil
+		auth, err = c.ensureCreatorResourceAuth(ctx)
+		if err != nil {
+			return err
+		}
+		sacsft, ok = auth.consumeBacsft()
+		if !ok {
+			return fmt.Errorf("Creator Resource signer has no bacsft token")
+		}
+	}
+	reqt := time.Now().UnixMilli()
+	ve := "1.0.0"
+	kp := ""
+	signature := GenerateSignature(auth.Dvidn, ve, kp, reqID, sacsft, reqt)
+	req.Header.Set("clt-acs-sign", signature)
+	req.Header.Set("clt-acs-reqt", fmt.Sprintf("%d", reqt))
+	req.Header.Set("clt-acs-request-params", "req_id")
+	req.Header.Set("clt-acs-caer", "vrad")
+	req.Header.Set("eo-clt-dvidn", auth.Dvidn)
+	req.Header.Set("eo-clt-sacsft", sacsft)
+	req.Header.Set("eo-clt-snver", auth.Snver)
+	req.Header.Set("eo-clt-actkn", auth.Actkn)
+	req.Header.Set("eo-clt-acs-ve", ve)
+	req.Header.Set("eo-clt-acs-kp", kp)
+	return nil
+}
+
+func (a *creatorResourceAuth) consumeBacsft() (string, bool) {
+	if a == nil || len(a.Bacsft) == 0 {
+		return "", false
+	}
+	token := a.Bacsft[0]
+	a.Bacsft = a.Bacsft[1:]
+	return token, true
+}
+
+func (c *qwenWebClient) ensureCreatorResourceAuth(ctx context.Context) (*creatorResourceAuth, error) {
+	if c.resourceAuth != nil && c.resourceAuth.Dvidn != "" && c.resourceAuth.Actkn != "" && len(c.resourceAuth.Bacsft) > 0 {
+		return c.resourceAuth, nil
+	}
+	umid, err := GenerateUMIDTokenWithRetry(3)
+	if err != nil {
+		return nil, fmt.Errorf("generate Creator Resource UMID token failed: %w", err)
+	}
+	payload := map[string]interface{}{
+		"screenResolution":    "1440x950",
+		"cookieEnabled":       true,
+		"localStorageEnabled": true,
+		"timezoneOffset":      "Asia/Shanghai",
+		"fontList":            []string{"Arial", "Calibri", "Century", "Century Gothic", "SimHei", "Segoe UI Light"},
+		"pluginList":          []interface{}{},
+		"language":            []string{"zh-CN"},
+		"unifyRelateGenerate": []string{},
+		"fingerprint":         generateFingerprint(c.deviceID),
+		"businessScene":       "quark_web",
+		"chid":                generateChid(),
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://ext.quark.cn/security/external/access/register", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Origin", qwenCreatorOrigin)
+	req.Header.Set("Referer", qwenCreatorOrigin+"/")
+	req.Header.Set("bx-umidtoken", umid)
+	req.Header.Set("clt-acs-caer", "vrad")
+	req.Header.Set("eo-clt-sftcnt", "20")
+	if c.cookieHeader != "" {
+		req.Header.Set("Cookie", c.cookieHeader)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("Creator Resource access register failed: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("Creator Resource access register status %d: %s", resp.StatusCode, string(raw))
+	}
+	var result RegisterResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("parse Creator Resource access register response failed: %w; body=%s", err, string(raw))
+	}
+	if result.Status != 0 {
+		return nil, fmt.Errorf("Creator Resource access register failed: code=%s msg=%s", result.Code, result.Msg)
+	}
+	auth := creatorResourceAuth{
+		Dvidn:  result.Data.EoCltDvidn,
+		Snver:  result.Data.EoCltSnver,
+		Bacsft: append([]string{}, result.Data.EoCltBacsft...),
+	}
+	for _, relate := range result.Data.UnifyRelate {
+		if relate.BusinessScene == "workspace_api" {
+			auth.Actkn = relate.EoCltActkn
+			auth.Bacsft = append([]string{}, relate.EoCltBacsft...)
+			if relate.EoCltSnver != "" {
+				auth.Snver = relate.EoCltSnver
+			}
+			break
+		}
+	}
+	if auth.Actkn == "" {
+		for _, relate := range result.Data.UnifyRelate {
+			if relate.EoCltActkn != "" && len(relate.EoCltBacsft) > 0 {
+				auth.Actkn = relate.EoCltActkn
+				auth.Bacsft = append([]string{}, relate.EoCltBacsft...)
+				if relate.EoCltSnver != "" {
+					auth.Snver = relate.EoCltSnver
+				}
+				break
+			}
+		}
+	}
+	if auth.Dvidn == "" || auth.Actkn == "" || auth.Snver == "" || len(auth.Bacsft) == 0 {
+		return nil, fmt.Errorf("Creator Resource access register returned incomplete signer material")
+	}
+	c.resourceAuth = &auth
+	return c.resourceAuth, nil
+}
+
+func readLimited(r io.Reader, limit int64) ([]byte, error) {
+	lr := io.LimitReader(r, limit+1)
+	body, err := io.ReadAll(lr)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("image is larger than %d bytes", limit)
+	}
+	return body, nil
+}
+
+func normalizeImageContentType(contentType string, body []byte) string {
+	contentType = strings.TrimSpace(strings.Split(contentType, ";")[0])
+	if contentType == "" || contentType == "application/octet-stream" {
+		contentType = http.DetectContentType(body)
+	}
+	switch contentType {
+	case "image/jpg":
+		return "image/jpeg"
+	default:
+		return contentType
+	}
+}
+
+func creatorFileNameFromURL(rawURL, contentType string) string {
+	parsed, err := url.Parse(rawURL)
+	name := ""
+	if err == nil {
+		name = filepath.Base(parsed.Path)
+	}
+	if name == "." || name == "/" || name == "" {
+		name = fmt.Sprintf("upload_%d%s", time.Now().UnixMilli(), creatorExtFromContentType(contentType))
+	}
+	if filepath.Ext(name) == "" {
+		name += creatorExtFromContentType(contentType)
+	}
+	return sanitizeCreatorFileName(name)
+}
+
+func creatorExtFromContentType(contentType string) string {
+	switch strings.ToLower(strings.Split(contentType, ";")[0]) {
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	default:
+		if exts, err := mime.ExtensionsByType(contentType); err == nil && len(exts) > 0 {
+			return exts[0]
+		}
+		return ".jpg"
+	}
+}
+
+func sanitizeCreatorFileName(name string) string {
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "." || name == "" {
+		return fmt.Sprintf("upload_%d.jpg", time.Now().UnixMilli())
+	}
+	replacer := strings.NewReplacer("\\", "_", "/", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_")
+	return replacer.Replace(name)
+}
+
+func creatorCallbackFileType(fileName, contentType string) string {
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(fileName)), ".")
+	if ext == "" {
+		ext = strings.TrimPrefix(creatorExtFromContentType(contentType), ".")
+	}
+	if ext == "jpeg" {
+		ext = "jpg"
+	}
+	return strings.ToUpper(ext)
+}
+
+func sliceFromAny(value interface{}) []interface{} {
+	if items, ok := value.([]interface{}); ok {
+		return items
+	}
+	return nil
 }
 
 func (c *qwenWebClient) pollSnap(ctx context.Context, state *qwenRequestState) ([]qwenWebEvent, error) {
