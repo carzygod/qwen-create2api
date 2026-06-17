@@ -98,6 +98,7 @@ type RegisterResponse struct {
 			BusinessScene string   `json:"businessScene"`
 			EoCltActkn    string   `json:"eo-clt-actkn"`
 			EoCltActknDl  int64    `json:"eo-clt-actkn-dl"`
+			EoCltSnver    string   `json:"eo-clt-snver"`
 			EoCltBacsft   []string `json:"eo-clt-bacsft"`
 		} `json:"unifyRelate"`
 		EoCltDvidn  string   `json:"eo-clt-dvidn"`
