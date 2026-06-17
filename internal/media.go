@@ -26,32 +26,32 @@ type ImageGenerationRequest struct {
 }
 
 type VideoGenerationRequest struct {
-	Model           string      `json:"model"`
-	Prompt          string      `json:"prompt"`
-	Duration        int         `json:"duration"`
-	DurationSeconds int         `json:"duration_seconds"`
-	Seconds         int         `json:"seconds"`
-	Ratio           string      `json:"ratio"`
-	Size            string      `json:"size"`
-	AspectRatio     string      `json:"aspect_ratio"`
-	Resolution      string      `json:"resolution"`
-	ImageURL        string      `json:"image_url"`
-	Image           string      `json:"image"`
-	FileID          string      `json:"file_id"`
-	FirstFrameImage string      `json:"first_frame_image"`
-	LastFrameImage  string      `json:"last_frame_image"`
-	FirstFrameMaterialID string `json:"first_frame_material_id"`
-	LastFrameMaterialID  string `json:"last_frame_material_id"`
-	ReferenceMaterialIDs []string `json:"reference_material_ids"`
-	ReferenceImages []string    `json:"reference_images"`
-	Seed            interface{} `json:"seed"`
-	NegativePrompt  string      `json:"negative_prompt"`
-	Metadata        interface{} `json:"metadata"`
-	AccountID       string      `json:"account_id"`
-	Async           *bool       `json:"async"`
-	Wait            bool        `json:"wait"`
-	Sync            bool        `json:"sync"`
-	Blocking        bool        `json:"blocking"`
+	Model                string      `json:"model"`
+	Prompt               string      `json:"prompt"`
+	Duration             int         `json:"duration"`
+	DurationSeconds      int         `json:"duration_seconds"`
+	Seconds              int         `json:"seconds"`
+	Ratio                string      `json:"ratio"`
+	Size                 string      `json:"size"`
+	AspectRatio          string      `json:"aspect_ratio"`
+	Resolution           string      `json:"resolution"`
+	ImageURL             string      `json:"image_url"`
+	Image                string      `json:"image"`
+	FileID               string      `json:"file_id"`
+	FirstFrameImage      string      `json:"first_frame_image"`
+	LastFrameImage       string      `json:"last_frame_image"`
+	FirstFrameMaterialID string      `json:"first_frame_material_id"`
+	LastFrameMaterialID  string      `json:"last_frame_material_id"`
+	ReferenceMaterialIDs []string    `json:"reference_material_ids"`
+	ReferenceImages      []string    `json:"reference_images"`
+	Seed                 interface{} `json:"seed"`
+	NegativePrompt       string      `json:"negative_prompt"`
+	Metadata             interface{} `json:"metadata"`
+	AccountID            string      `json:"account_id"`
+	Async                *bool       `json:"async"`
+	Wait                 bool        `json:"wait"`
+	Sync                 bool        `json:"sync"`
+	Blocking             bool        `json:"blocking"`
 }
 
 func HandleImageGenerations(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +154,11 @@ func HandleVideoGenerations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, err := videoCandidateAccounts(req); err != nil {
+		writeNoVideoAccountError(w, err)
+		return
+	}
+
 	body, _ := json.Marshal(req)
 	task := &TaskRecord{
 		Type:        "video",
@@ -226,8 +231,9 @@ func handleVideoGenerationsSyncRequest(w http.ResponseWriter, r *http.Request, r
 func executeVideoTask(ctx context.Context, taskID string, req VideoGenerationRequest) error {
 	accounts, err := videoCandidateAccounts(req)
 	if err != nil {
-		_ = AppStore.UpdateTaskFailed(taskID, "no_video_account", err.Error(), "")
-		return err
+		message := noVideoAccountMessage(err)
+		_ = AppStore.UpdateTaskFailed(taskID, "no_video_account", message, "")
+		return fmt.Errorf("%s", message)
 	}
 
 	var attemptErrors []string
@@ -252,6 +258,25 @@ func executeVideoTask(ctx context.Context, taskID string, req VideoGenerationReq
 	}
 	_ = AppStore.UpdateTaskFailed(taskID, "qianwen_creator_video_generation_failed", message, "")
 	return fmt.Errorf("%s", message)
+}
+
+func writeNoVideoAccountError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	code := "account_select_failed"
+	message := err.Error()
+	if err == sql.ErrNoRows {
+		status = http.StatusFailedDependency
+		code = "no_video_account"
+		message = noVideoAccountMessage(err)
+	}
+	writeAPIError(w, status, code, message)
+}
+
+func noVideoAccountMessage(err error) string {
+	if err == sql.ErrNoRows {
+		return "No video-capable Qianwen Creator login account is available. Add an account in Admin and run account test until status is valid."
+	}
+	return err.Error()
 }
 
 func submitAndPollVideoWithAccount(ctx context.Context, taskID string, req VideoGenerationRequest, account AccountRecord) error {
