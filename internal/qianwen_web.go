@@ -65,6 +65,7 @@ type creatorVideoModelSpec struct {
 	UpstreamModel     string
 	RootModel         string
 	Scene             string
+	GenMode           string
 	SupportsFirst     bool
 	SupportsLast      bool
 	TypedAttachments  bool
@@ -237,25 +238,26 @@ func (c *qwenWebClient) buildCreatorVideoPayload(req VideoGenerationRequest, spe
 	}
 
 	params := map[string]interface{}{
-		"size":        aspect,
-		"resolution":  resolution,
-		"audio":       false,
-		"attachments": attachments,
-		"duration":    duration,
-	}
-	if spec.AttachmentTypeKey && len(attachments) > 0 {
-		params["attachmentType"] = "image"
+		"size":           aspect,
+		"resolution":     resolution,
+		"audio":          false,
+		"attachments":    attachments,
+		"duration":       duration,
+		"attachmentType": 0,
 	}
 
-	return map[string]interface{}{
+	payload := map[string]interface{}{
 		"originPrompt": req.Prompt,
 		"prompt":       req.Prompt,
 		"scene":        spec.Scene,
 		"model":        spec.UpstreamModel,
 		"rootModel":    spec.RootModel,
 		"params":       params,
-		"templateId":   "",
 	}
+	if spec.GenMode != "" {
+		payload["genMode"] = spec.GenMode
+	}
+	return payload
 }
 
 func (c *qwenWebClient) resolveCreatorMaterialID(ctx context.Context, explicitMaterialID, imageValue string) (string, error) {
@@ -286,7 +288,7 @@ func (c *qwenWebClient) resolveCreatorMaterialID(ctx context.Context, explicitMa
 		return "", err
 	}
 	if code := intFromAny(resp["code"]); code != 0 {
-		return "", fmt.Errorf("Creator material restore failed: code=%d msg=%s", code, stringFromAny(resp["msg"]))
+		return "", fmt.Errorf("Creator material restore failed: code=%d msg=%s; pass first_frame_material_id/last_frame_material_id until the Creator Resource signing flow is implemented", code, stringFromAny(resp["msg"]))
 	}
 	data := mapFromAny(resp["data"])
 	materialID := firstNonEmptyString(
@@ -351,8 +353,9 @@ func (c *qwenWebClient) postCreatorJSON(ctx context.Context, baseURL, path strin
 }
 
 func (c *qwenWebClient) postCreatorJSONWithReqID(ctx context.Context, baseURL, path string, payload map[string]interface{}, reqID string) (map[string]interface{}, error) {
-	body, _ := json.Marshal(payload)
-	url := creatorAPIURL(baseURL, path, reqID)
+	bodyPayload, chid, ts := c.withCreatorRuntimeFields(baseURL, payload)
+	body, _ := json.Marshal(bodyPayload)
+	url := creatorAPIURL(baseURL, path, reqID, chid, ts)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -374,13 +377,40 @@ func (c *qwenWebClient) postCreatorJSONWithReqID(ctx context.Context, baseURL, p
 	return result, nil
 }
 
-func creatorAPIURL(baseURL, path, reqID string) string {
+func (c *qwenWebClient) withCreatorRuntimeFields(baseURL string, payload map[string]interface{}) (map[string]interface{}, string, int64) {
+	chid := generateChid()
 	ts := time.Now().UnixMilli()
+	if !strings.Contains(baseURL, "ai-studio") {
+		return payload, chid, ts
+	}
+	next := make(map[string]interface{}, len(payload)+5)
+	for key, value := range payload {
+		next[key] = value
+	}
+	if _, ok := next["chid"]; !ok {
+		next["chid"] = chid
+	}
+	if _, ok := next["product"]; !ok {
+		next["product"] = "ai_studio"
+	}
+	if _, ok := next["browserId"]; !ok {
+		next["browserId"] = c.deviceID
+	}
+	if _, ok := next["timestamp"]; !ok {
+		next["timestamp"] = ts
+	}
+	if _, ok := next["platform"]; !ok {
+		next["platform"] = "pc"
+	}
+	return next, chid, ts
+}
+
+func creatorAPIURL(baseURL, path, reqID, chid string, ts int64) string {
 	sep := "?"
 	if strings.Contains(path, "?") {
 		sep = "&"
 	}
-	return fmt.Sprintf("%s%s%sbiz_id=ai_image&req_id=%s&ai_ts=%d&platform=pc&pr=qianwen&fr=pc", strings.TrimRight(baseURL, "/"), path, sep, reqID, ts)
+	return fmt.Sprintf("%s%s%sbiz_id=ai_image&req_id=%s&ai_ts=%d&chid=%s&platform=pc&pr=qianwen&fr=pc", strings.TrimRight(baseURL, "/"), path, sep, reqID, ts, chid)
 }
 
 func (c *qwenWebClient) setCreatorHeaders(req *http.Request, baseURL, reqID string) {
@@ -407,19 +437,22 @@ func creatorModelSpec(model string) creatorVideoModelSpec {
 	switch normalizeQianwenVideoModel(model) {
 	case "qianwen-creator-wan21-frame":
 		return creatorVideoModelSpec{
-			PublicModel:   "qianwen-creator-wan21-frame",
-			UpstreamModel: "wanx2.1-kf2v-plus",
-			RootModel:     "wanx2_1_plus",
-			Scene:         "frame_image_to_video",
-			SupportsFirst: true,
-			SupportsLast:  true,
+			PublicModel:      "qianwen-creator-wan21-frame",
+			UpstreamModel:    "wanx2.1-kf2v-plus",
+			RootModel:        "wan21",
+			Scene:            "frame_image_to_video",
+			GenMode:          "vid_gen",
+			SupportsFirst:    true,
+			SupportsLast:     true,
+			TypedAttachments: true,
 		}
 	case "qianwen-creator-wan22-flash-frame":
 		return creatorVideoModelSpec{
 			PublicModel:      "qianwen-creator-wan22-flash-frame",
 			UpstreamModel:    "wan2.2-kf2v-flash",
-			RootModel:        "wanx2_2_flash",
+			RootModel:        "wan22_flash",
 			Scene:            "wan22_flash_frame_itv",
+			GenMode:          "vid_gen",
 			SupportsFirst:    true,
 			SupportsLast:     true,
 			TypedAttachments: true,
@@ -428,8 +461,9 @@ func creatorModelSpec(model string) creatorVideoModelSpec {
 		return creatorVideoModelSpec{
 			PublicModel:      "qianwen-creator-wan25-i2v",
 			UpstreamModel:    "wan2.5-i2v-preview",
-			RootModel:        "wanx2.5",
+			RootModel:        "wan25",
 			Scene:            "wan25_first_frame_itv",
+			GenMode:          "vid_gen",
 			SupportsFirst:    true,
 			TypedAttachments: true,
 		}
@@ -437,8 +471,9 @@ func creatorModelSpec(model string) creatorVideoModelSpec {
 		return creatorVideoModelSpec{
 			PublicModel:   "qianwen-creator-wan25-t2v",
 			UpstreamModel: "wan2.5-t2v-preview",
-			RootModel:     "wanx2.5",
+			RootModel:     "wan25",
 			Scene:         "wan25_txt_to_video",
+			GenMode:       "vid_gen",
 		}
 	case "qianwen-creator-wan27-frame":
 		return creatorVideoModelSpec{
@@ -446,6 +481,7 @@ func creatorModelSpec(model string) creatorVideoModelSpec {
 			UpstreamModel:    "wan2.7-i2v",
 			RootModel:        "wan27",
 			Scene:            "wan27_frame_i2v",
+			GenMode:          "vid_gen",
 			SupportsFirst:    true,
 			SupportsLast:     true,
 			TypedAttachments: true,
@@ -456,6 +492,7 @@ func creatorModelSpec(model string) creatorVideoModelSpec {
 			UpstreamModel:    "happyhorse",
 			RootModel:        "happyhorse",
 			Scene:            "hh_first_frame_i2v",
+			GenMode:          "vid_gen",
 			SupportsFirst:    true,
 			TypedAttachments: true,
 		}

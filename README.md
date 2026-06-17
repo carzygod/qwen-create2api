@@ -17,9 +17,10 @@ This project does not use official Qwen API keys. It stores logged-in Web sessio
 | Admin WebUI | Implemented |
 | QR/browser login capture | Opens `create.qianwen.com` and captures Creator-related cookies |
 | Async video task API | Implemented |
-| First-frame video | Implemented at request-wrapper level |
+| Text-to-video | Verified on SH01 with `qianwen-creator-wan25-t2v` |
+| First-frame video | Verified on SH01 with `first_frame_material_id` and `qianwen-creator-wan25-i2v` |
 | First+last-frame video | Implemented at request-wrapper level |
-| Public image URL to material id | Implemented via observed `/1/material/file_url/restore` path |
+| Public image URL to material id | Observed but not production-usable yet; direct restore currently fails upstream with `code=10009` signature verification |
 | Base64/binary upload | Reserved; requires full OSS upload-flow capture under a logged-in account |
 | Creator image generation | Not exposed in `/v1/models` yet |
 
@@ -89,17 +90,17 @@ curl -X POST "$BASE_URL/v1/video/generations/sync" \
     "duration": 5,
     "resolution": "720P",
     "aspect_ratio": "9:16",
-    "first_frame_image": "https://example.com/first.png",
-    "last_frame_image": "https://example.com/last.png"
+    "first_frame_material_id": "creator-material-id-for-first-frame",
+    "last_frame_material_id": "creator-material-id-for-last-frame"
   }'
 ```
 
 `first_frame_image` and `last_frame_image` accept:
 
 - Creator material ids.
-- Public image URLs; the service will try `/1/material/file_url/restore`.
+- Public image URLs are attempted through `/1/material/file_url/restore`, but this path is not considered stable yet because the upstream Resource service currently rejects cookie-only direct requests with `code=10009`.
 
-For the most reliable path, pass `first_frame_material_id` and `last_frame_material_id`.
+For the validated path, pass `first_frame_material_id` and `last_frame_material_id`.
 
 ## Admin
 
@@ -168,6 +169,7 @@ Observed URL material restore:
 - Base: `https://aistudio-resource.quark.cn`
 - Path: `POST /1/material/file_url/restore`
 - Body: `{ "entry": "image_refer", "file_name": "...", "url": "..." }`
+- Current validation result: direct HTTP restore with the captured Web cookie returns `code=10009` signature verification failure. The service keeps this path as best-effort, but NewAPI/channel integrations should use Creator material ids until a full browser/OSS upload flow is implemented.
 
 Observed first+last frame payload shape:
 
@@ -177,17 +179,26 @@ Observed first+last frame payload shape:
   "prompt": "...",
   "scene": "wan22_flash_frame_itv",
   "model": "wan2.2-kf2v-flash",
-  "rootModel": "wanx2_2_flash",
+  "rootModel": "wan22_flash",
+  "genMode": "vid_gen",
   "params": {
     "size": "9:16",
     "resolution": "720P",
     "audio": false,
     "duration": 5,
+    "attachmentType": 0,
     "attachments": [
       { "type": "image", "materialId": "first-frame-material-id" },
       { "type": "image", "materialId": "last-frame-material-id" }
     ]
-  },
-  "templateId": ""
+  }
 }
 ```
+
+## SH01 Validation
+
+Validated on `http://150.158.144.62:18012`:
+
+- `qianwen-creator-wan25-t2v`: text-to-video completed and returned a playable video URL.
+- `qianwen-creator-wan25-i2v`: first-frame image-to-video completed when using an existing Creator material id.
+- Public image URL restore is not counted as usable yet because the Resource endpoint returns `code=10009`.

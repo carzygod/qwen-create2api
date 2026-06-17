@@ -1,6 +1,8 @@
 FROM golang:1.21-alpine AS builder
 
-RUN apk add --no-cache git
+RUN set -eux; \
+    sed -i "s|https://dl-cdn.alpinelinux.org/alpine|https://mirrors.tencentyun.com/alpine|g" /etc/apk/repositories; \
+    apk add --no-cache git
 
 WORKDIR /app
 
