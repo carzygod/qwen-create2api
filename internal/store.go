@@ -389,7 +389,7 @@ func (s *Store) ListRunnableAccountsForCapability(capability string) ([]AccountR
 	}
 	var runnable []AccountRecord
 	for _, a := range accounts {
-		if !a.Enabled || a.Status == "invalid" {
+		if !a.Enabled || a.Status != "valid" {
 			continue
 		}
 		if strings.TrimSpace(a.CookieJSON) == "" && strings.TrimSpace(a.CookieString) == "" {

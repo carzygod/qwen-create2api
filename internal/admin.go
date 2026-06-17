@@ -102,7 +102,11 @@ func handleListAccounts(w http.ResponseWriter, r *http.Request) {
 
 func handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name string `json:"name"`
+		Name             string `json:"name"`
+		CookieJSON       string `json:"cookie_json"`
+		CookieString     string `json:"cookie_string"`
+		LocalStorageJSON string `json:"local_storage_json"`
+		UserAgent        string `json:"user_agent"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid_json", err.Error())
@@ -111,6 +115,29 @@ func handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		writeAPIError(w, http.StatusBadRequest, "account_name_required", "Account name is required before generating a QR login session.")
+		return
+	}
+	if strings.TrimSpace(req.CookieJSON) != "" || strings.TrimSpace(req.CookieString) != "" {
+		account := &AccountRecord{
+			Name:             name,
+			Type:             "login_cookie",
+			Status:           "unknown",
+			Enabled:          true,
+			CookieJSON:       strings.TrimSpace(req.CookieJSON),
+			CookieString:     strings.TrimSpace(req.CookieString),
+			LocalStorageJSON: strings.TrimSpace(req.LocalStorageJSON),
+			UserAgent:        defaultString(strings.TrimSpace(req.UserAgent), generateRandomUserAgent()),
+			CapabilitiesJSON: `{"chat":true,"image":true,"video":true}`,
+			LastError:        "Cookie material imported. Run account test before routing traffic to this account.",
+		}
+		if err := AppStore.CreateAccount(account); err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "account_create_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]interface{}{
+			"data": maskAccount(*account),
+			"next": "test_account",
+		})
 		return
 	}
 	session, err := QianwenLoginSessions.Start(name)
@@ -234,7 +261,7 @@ func maskSecret(value string) string {
 	return value[:6] + "..." + value[len(value)-4:]
 }
 
-const adminHTML = `<!doctype html>
+const legacyAdminHTML = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />

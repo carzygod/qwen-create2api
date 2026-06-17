@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	cdpinput "github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 	"github.com/google/uuid"
@@ -289,6 +290,18 @@ func (s *LoginSession) run() {
 	if ctx.Err() != nil {
 		return
 	}
+	_ = clickLikelyCenterLogin(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	_ = clickLikelyQRLoginTab(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	_ = clickLikelyQRCodeLink(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 	_ = s.RefreshScreenshot()
 	if ctx.Err() != nil {
 		return
@@ -335,14 +348,27 @@ func (s *LoginSession) run() {
 func clickVisibleLogin(ctx context.Context) error {
 	var clicked bool
 	script := `(() => {
-  const textRe = /(登录|登陆|Sign in|Log in)/i;
-  const nodes = Array.from(document.querySelectorAll('button,a,div,span'));
+  const textRe = /(登录|登陆|立即登录|马上登录|扫码登录|Sign in|Log in)/i;
+  const nodes = Array.from(document.querySelectorAll('button,a,div,span,[role="button"]'));
   const isVisible = (el) => {
     const rect = el.getBoundingClientRect();
     const style = getComputedStyle(el);
-    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && rect.left < innerWidth && rect.top < innerHeight;
   };
-  const el = nodes.find((node) => isVisible(node) && textRe.test((node.innerText || node.textContent || '').trim()));
+  const score = (node) => {
+    const text = [
+      node.innerText || '',
+      node.textContent || '',
+      node.getAttribute('aria-label') || '',
+      node.getAttribute('title') || ''
+    ].join(' ').trim();
+    if (!textRe.test(text)) return 0;
+    const rect = node.getBoundingClientRect();
+    const centerBias = 1 - Math.min(1, Math.abs((rect.left + rect.width / 2) - innerWidth / 2) / innerWidth);
+    return 10 + centerBias;
+  };
+  const candidates = nodes.filter(isVisible).map((node) => ({ node, score: score(node) })).filter((item) => item.score > 0).sort((a, b) => b.score - a.score);
+  const el = candidates[0] && candidates[0].node;
   if (el) {
     el.click();
     return true;
@@ -368,6 +394,52 @@ func clickLikelyTopRightLogin(ctx context.Context) error {
 	)
 }
 
+func clickLikelyCenterLogin(ctx context.Context) error {
+	return chromedp.Run(ctx,
+		chromedp.MouseClickXY(865, 562),
+		chromedp.Sleep(2*time.Second),
+	)
+}
+
+func clickLikelyQRLoginTab(ctx context.Context) error {
+	var clicked bool
+	script := `(() => {
+  const textRe = /(扫码|二维码|QR)/i;
+  const nodes = Array.from(document.querySelectorAll('button,a,div,span,[role="tab"],[role="button"]'));
+  const isVisible = (el) => {
+    const rect = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && rect.left < innerWidth && rect.top < innerHeight;
+  };
+  const el = nodes.find((node) => isVisible(node) && textRe.test([node.innerText || '', node.textContent || '', node.getAttribute('aria-label') || '', node.getAttribute('title') || ''].join(' ')));
+  if (el) {
+    el.click();
+    return true;
+  }
+  return false;
+})()`
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(script, &clicked),
+		chromedp.Sleep(1*time.Second),
+	); err != nil {
+		return err
+	}
+	if clicked {
+		LogInfo("Clicked a visible qianwen QR login trigger")
+	}
+	return chromedp.Run(ctx,
+		chromedp.MouseClickXY(883, 365),
+		chromedp.Sleep(2*time.Second),
+	)
+}
+
+func clickLikelyQRCodeLink(ctx context.Context) error {
+	return chromedp.Run(ctx,
+		chromedp.MouseClickXY(815, 678),
+		chromedp.Sleep(2*time.Second),
+	)
+}
+
 func (s *LoginSession) TriggerLogin() error {
 	s.mu.Lock()
 	ctx := s.ctx
@@ -381,10 +453,97 @@ func (s *LoginSession) TriggerLogin() error {
 	if err := clickLikelyTopRightLogin(ctx); err != nil {
 		return err
 	}
+	if err := clickLikelyCenterLogin(ctx); err != nil {
+		return err
+	}
+	if err := clickLikelyQRLoginTab(ctx); err != nil {
+		return err
+	}
+	if err := clickLikelyQRCodeLink(ctx); err != nil {
+		return err
+	}
 	if err := s.RefreshScreenshot(); err != nil {
 		return err
 	}
 	s.setStatus("waiting_scan", "Clicked the likely Qianwen Creator login entry. Scan the QR code if it is visible, then capture the login state.")
+	return nil
+}
+
+func (s *LoginSession) ClickAt(x, y float64) error {
+	s.mu.Lock()
+	ctx := s.ctx
+	s.mu.Unlock()
+	if ctx == nil {
+		return fmt.Errorf("login browser is not ready")
+	}
+	if x < 0 || y < 0 || x > 10000 || y > 10000 {
+		return fmt.Errorf("click coordinates are out of range")
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.MouseClickXY(x, y),
+		chromedp.Sleep(450*time.Millisecond),
+	); err != nil {
+		return err
+	}
+	_ = s.RefreshScreenshot()
+	s.setStatus("waiting_login", "Clicked the remote login browser. Continue interacting with the screenshot until logged in, then capture and test the account.")
+	return nil
+}
+
+func (s *LoginSession) TypeText(text string) error {
+	s.mu.Lock()
+	ctx := s.ctx
+	s.mu.Unlock()
+	if ctx == nil {
+		return fmt.Errorf("login browser is not ready")
+	}
+	if len(text) > 2048 {
+		return fmt.Errorf("text is too long")
+	}
+	if err := chromedp.Run(ctx,
+		cdpinput.InsertText(text),
+		chromedp.Sleep(450*time.Millisecond),
+	); err != nil {
+		return err
+	}
+	_ = s.RefreshScreenshot()
+	s.setStatus("waiting_login", "Typed into the focused field in the remote login browser.")
+	return nil
+}
+
+func (s *LoginSession) PressKey(key string) error {
+	s.mu.Lock()
+	ctx := s.ctx
+	s.mu.Unlock()
+	if ctx == nil {
+		return fmt.Errorf("login browser is not ready")
+	}
+	normalized := strings.TrimSpace(key)
+	if normalized == "" {
+		return fmt.Errorf("key is required")
+	}
+	allowed := map[string]string{
+		"Enter":      "Enter",
+		"Tab":        "Tab",
+		"Backspace":  "Backspace",
+		"Escape":     "Escape",
+		"ArrowUp":    "ArrowUp",
+		"ArrowDown":  "ArrowDown",
+		"ArrowLeft":  "ArrowLeft",
+		"ArrowRight": "ArrowRight",
+	}
+	keyName, ok := allowed[normalized]
+	if !ok {
+		return fmt.Errorf("unsupported key %q", key)
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.KeyEvent(keyName),
+		chromedp.Sleep(450*time.Millisecond),
+	); err != nil {
+		return err
+	}
+	_ = s.RefreshScreenshot()
+	s.setStatus("waiting_login", "Sent key "+keyName+" to the remote login browser.")
 	return nil
 }
 
@@ -610,21 +769,27 @@ func hasLikelyLoginCookie(cookies []capturedCookie) bool {
 	if len(cookies) == 0 {
 		return false
 	}
-	authMarkers := []string{
-		"login", "token", "session", "sid", "havana", "aliyun", "taobao",
-		"munb", "unb", "cookie2", "_tb_token_", "sgcookie", "x5sec", "isg", "tfstk",
-		"tongyi_sso_ticket", "tongyi_sso_ticket_hash",
+	strongNames := map[string]bool{
+		"tongyi_sso_ticket":      true,
+		"tongyi_sso_ticket_hash": true,
+		"munb":                   true,
+		"unb":                    true,
+		"cookie2":                true,
+		"_tb_token_":             true,
+		"sgcookie":               true,
+		"login_aliyunid":         true,
+		"login_aliyunid_ticket":  true,
+		"xman_us_f":              true,
+		"xman_t":                 true,
+		"tracknick":              true,
 	}
 	for _, cookie := range cookies {
 		name := strings.ToLower(cookie.Name)
-		domain := strings.ToLower(cookie.Domain)
-		for _, marker := range authMarkers {
-			if strings.Contains(name, marker) || strings.Contains(domain, marker) {
-				return true
-			}
+		if strongNames[name] {
+			return true
 		}
 	}
-	return len(cookies) >= 2
+	return false
 }
 
 func cookieNames(cookies []capturedCookie) []string {
@@ -829,6 +994,58 @@ func handleLoginSessions(w http.ResponseWriter, r *http.Request, path string) {
 		}
 		if err := session.TriggerLogin(); err != nil {
 			writeAPIError(w, http.StatusFailedDependency, "login_click_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"data": session.view()})
+	case "click":
+		if r.Method != http.MethodPost {
+			writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
+			return
+		}
+		var body struct {
+			X float64 `json:"x"`
+			Y float64 `json:"y"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid_json", err.Error())
+			return
+		}
+		if err := session.ClickAt(body.X, body.Y); err != nil {
+			writeAPIError(w, http.StatusFailedDependency, "login_click_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"data": session.view()})
+	case "type":
+		if r.Method != http.MethodPost {
+			writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
+			return
+		}
+		var body struct {
+			Text string `json:"text"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid_json", err.Error())
+			return
+		}
+		if err := session.TypeText(body.Text); err != nil {
+			writeAPIError(w, http.StatusFailedDependency, "login_type_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"data": session.view()})
+	case "key":
+		if r.Method != http.MethodPost {
+			writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
+			return
+		}
+		var body struct {
+			Key string `json:"key"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid_json", err.Error())
+			return
+		}
+		if err := session.PressKey(body.Key); err != nil {
+			writeAPIError(w, http.StatusFailedDependency, "login_key_failed", err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{"data": session.view()})

@@ -32,7 +32,7 @@ RUN set -eux; \
         /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true; \
     fi; \
     apt-get update && \
-    apt-get install -y ca-certificates dumb-init && \
+    apt-get install -y --no-install-recommends ca-certificates dumb-init fonts-wqy-zenhei && \
     rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -r appuser && useradd -r -g appuser appuser

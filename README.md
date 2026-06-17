@@ -15,10 +15,10 @@ This project does not use official Qwen API keys. It stores logged-in Web sessio
 |---|---|
 | SQLite account pool | Implemented |
 | Admin WebUI | Implemented |
-| QR/browser login capture | Opens `create.qianwen.com` and captures Creator-related cookies |
+| QR/browser login capture | Opens `create.qianwen.com`, defaults to QR login, supports screenshot click/type controls, and captures Creator-related cookies |
 | Async video task API | Implemented |
-| Text-to-video | Verified on SH01 with `qianwen-creator-wan25-t2v` |
-| First-frame video | Verified on SH01 with `first_frame_material_id` and `qianwen-creator-wan25-i2v` |
+| Text-to-video | Historically verified on SH01 with `qianwen-creator-wan25-t2v`; requires a current `valid` account |
+| First-frame video | Historically verified on SH01 with `first_frame_material_id` and `qianwen-creator-wan25-i2v`; requires a current `valid` account |
 | First+last-frame video | Implemented at request-wrapper level |
 | Public image URL to material id | Observed but not production-usable yet; direct restore currently fails upstream with `code=10009` signature verification |
 | Base64/binary upload | Reserved; requires full OSS upload-flow capture under a logged-in account |
@@ -37,7 +37,8 @@ Important: the Creator Web app uses client-side signing/encryption helpers befor
 | `qianwen-creator-wan27-frame` | `wan27_frame_i2v` | `wan2.7-i2v` | yes | yes |
 | `qianwen-creator-happyhorse-i2v` | `hh_first_frame_i2v` | `happyhorse` | yes | no |
 
-Default video model: `qianwen-creator-wan22-flash-frame`.
+Code default video model: `qianwen-creator-wan22-flash-frame`.
+SH01 currently runs with `DEFAULT_VIDEO_MODEL=qianwen-creator-wan25-t2v` for text-to-video smoke compatibility.
 
 ## API
 
@@ -111,7 +112,9 @@ For the validated path, pass `first_frame_material_id` and `last_frame_material_
 Admin supports:
 
 - Account list.
-- Start Creator login session.
+- Start Creator QR/screenshot login session.
+- Click the remote Chromium screenshot, type text into the focused field, and send Enter/Tab/Backspace/Escape.
+- Import Cookie Header / Cookie JSON for an already logged-in Creator browser session.
 - Capture cookies into SQLite.
 - Test account session.
 - View task list.
@@ -199,6 +202,8 @@ Observed first+last frame payload shape:
 
 Validated on `http://150.158.144.62:18012`:
 
-- `qianwen-creator-wan25-t2v`: text-to-video completed and returned a playable video URL.
-- `qianwen-creator-wan25-i2v`: first-frame image-to-video completed when using an existing Creator material id.
+- 2026-06-17 login regression: Admin loads, new-account flow opens a readable QR login screenshot by default, screenshot-click API works, and historical false-captured visitor accounts were removed.
+- Current account pool is intentionally empty. Add a Creator account and run account test until it is marked `valid` before routing traffic.
+- Historical: `qianwen-creator-wan25-t2v` text-to-video completed and returned a playable video URL.
+- Historical: `qianwen-creator-wan25-i2v` first-frame image-to-video completed when using an existing Creator material id.
 - Public image URL restore is not counted as usable yet because the Resource endpoint returns `code=10009`.
