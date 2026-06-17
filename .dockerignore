@@ -1,0 +1,40 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+qianwen2api
+
+# Test files
+*_test.go
+test.bat
+test.sh
+
+# Documentation
+*.md
+!README.md
+
+# Data
+data/
+*.json
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
