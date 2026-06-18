@@ -40,6 +40,30 @@ Important: the Creator Web app uses client-side signing helpers before calling A
 Code default video model: `qianwen-creator-wan22-flash-frame`.
 SH01 currently runs with `DEFAULT_VIDEO_MODEL=qianwen-creator-wan25-t2v` for text-to-video smoke compatibility.
 
+## gen2api Compatibility
+
+`QIANWEN-CREATOR-01` is designed to be consumed by gen2api and NewAPI-style video gateways as a standalone provider. It must not be merged into `QIANWEN-WEB-01`.
+
+| Integration Point | Contract |
+|---|---|
+| Provider code | `QIANWEN-CREATOR-01` |
+| Default port | `18012` |
+| API base | `/v1` |
+| Runtime API key env | `QIANWEN_CREATOR_AUTH_KEY` in gen2api/deploy runtime files; mapped to service `AUTH_KEY` |
+| Runtime admin key env | `QIANWEN_CREATOR_ADMIN_KEY` in gen2api/deploy runtime files; mapped to service `ADMIN_KEY` |
+| Account sync source | `/opt/ai-aggregator/data/QIANWEN-CREATOR-01/qianwen-creator-01.sqlite`, table `qianwen_accounts` |
+| Preferred manual test endpoint | `POST /v1/video/generations/sync` |
+| Async gateway endpoint | `POST /v1/video/generations` then `GET /v1/video/generations/{task_id}` |
+| First-frame field | `first_frame_image` |
+| Last-frame field | `last_frame_image` |
+
+gen2api playground behavior:
+
+- `firstFrameUrl` is converted to `first_frame_image`.
+- `lastFrameUrl` is converted to `last_frame_image`.
+- Public URLs and data URI images are accepted; this service uploads them to Creator OSS and submits the returned material ids to create.qianwen.com.
+- The third-party account page syncs saved Creator Admin WebUI accounts from SQLite. It does not store API keys, NewAPI channel keys, or raw Creator cookies as account materials.
+
 ## API
 
 ### Create Async Video
@@ -209,3 +233,4 @@ Validated on `http://150.158.144.62:18012`:
 - Historical: `qianwen-creator-wan25-t2v` text-to-video completed and returned a playable video URL.
 - Historical: `qianwen-creator-wan25-i2v` first-frame image-to-video completed when using an existing Creator material id.
 - 2026-06-18: `qianwen-creator-wan22-flash-frame` first+last-frame video completed using two public image URLs. The service uploaded both images through Creator OSS and returned a playable mp4.
+- 2026-06-18 gen2api path: JP01 generated two related storyboard frames with `gpt-image-2`; SH01 submitted those images as data URIs to `qianwen-creator-wan22-flash-frame`; task `ba33dbb7-a7fd-485e-a18c-91bbe19aafd5` completed and returned a playable 5-second H.264 mp4.
