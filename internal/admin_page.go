@@ -125,6 +125,7 @@ pre.out{max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-wor
           <div class="card" v-if="selectedAccount">
             <div class="detail-head"><div class="detail-title"><div class="avatar">{{selectedAccount.name.slice(0,1).toUpperCase()}}</div><div><h2>{{selectedAccount.name}}</h2><div class="account-id">{{selectedAccount.id}}</div></div></div><span :class="['badge',selectedAccount.status]">{{statusText(selectedAccount.status)}}</span></div>
             <div class="actions" style="margin-bottom:16px">
+              <button class="btn primary" @click="startMaintenance(selectedAccount.id)">检修</button>
               <button class="btn primary" @click="testAccount(selectedAccount.id)" :disabled="probe.loading">测活</button>
               <button class="btn" @click="deleteAccount(selectedAccount.id)">删除</button>
             </div>
@@ -146,7 +147,7 @@ pre.out{max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-wor
             <div class="table-wrap">
               <table><thead><tr><th>会话</th><th>状态</th><th>Cookies</th><th>消息</th><th>操作</th></tr></thead>
               <tbody>
-                <tr v-for="s in sessions" :key="s.id"><td><div class="mono">{{s.name}}</div><div class="hint mono">{{s.id}}</div></td><td><span :class="['badge',s.status]">{{statusText(s.status)}}</span></td><td>{{s.cookie_count}}</td><td>{{s.message}}</td><td><div class="actions"><button class="btn" @click="showSession(s.id)">打开</button><button class="btn" @click="refreshSession(s.id)">刷新</button><button class="btn primary" @click="captureSession(s.id)">捕获并测活</button><button class="btn danger" @click="deleteSession(s.id)">删除</button></div></td></tr>
+                <tr v-for="s in sessions" :key="s.id"><td><div class="mono">{{s.name}}</div><div class="hint mono">{{s.id}}</div></td><td><span :class="['badge',s.status]">{{statusText(s.status)}}</span></td><td>{{s.cookie_count}}</td><td>{{s.message}}</td><td><div class="actions"><button class="btn" @click="showSession(s.id)">打开</button><button v-if="s.novnc_url" class="btn" @click="openNoVNC(s.novnc_url)">noVNC</button><button v-if="s.mode!=='maintenance'" class="btn" @click="refreshSession(s.id)">刷新</button><button class="btn primary" @click="captureSession(s.id)">捕获并测活</button><button class="btn danger" @click="deleteSession(s.id)">删除</button></div></td></tr>
                 <tr v-if="!sessions.length"><td colspan="5" class="empty">暂无登录会话。</td></tr>
               </tbody></table>
             </div>
@@ -243,7 +244,7 @@ pre.out{max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-wor
           <button class="btn" @click="pressSessionKey(qr.session_id,'Backspace')">Backspace</button>
           <button class="btn" @click="pressSessionKey(qr.session_id,'Escape')">Esc</button>
         </div>
-        <div class="actions"><button class="btn" @click="clickLoginEntry(qr.session_id)">点击登录入口</button><button class="btn" @click="refreshSession(qr.session_id)">刷新会话</button><button class="btn primary" @click="captureSession(qr.session_id)">捕获并测活</button><button class="btn danger" @click="deleteSession(qr.session_id)">删除会话</button></div>
+        <div class="actions"><button v-if="qr.novnc_url" class="btn" @click="openNoVNC(qr.novnc_url)">noVNC</button><button class="btn" @click="clickLoginEntry(qr.session_id)">点击登录入口</button><button v-if="qr.mode!=='maintenance'" class="btn" @click="refreshSession(qr.session_id)">刷新会话</button><button class="btn primary" @click="captureSession(qr.session_id)">捕获并测活</button><button class="btn danger" @click="deleteSession(qr.session_id)">删除会话</button></div>
       </div>
     </div>
   </div>
@@ -259,7 +260,7 @@ createApp({
     const summary=reactive({service:{},accounts:{},tasks:{}});
     const addModal=ref(false),newAccount=reactive({name:"",mode:"browser",cookie_string:"",cookie_json:"",local_storage_json:"",user_agent:""});
     const probe=reactive({loading:false,status:"",message:""});
-    const qr=reactive({open:false,session_id:"",name:"",status:"",text:"",input:"",timer:null});
+    const qr=reactive({open:false,session_id:"",name:"",status:"",text:"",input:"",mode:"",novnc_url:"",timer:null});
     const test=reactive({account_id:"",model:"",prompt:"你好，请只回复一句话确认你可用。",output:"",error:"",loading:false});
     const systemNote=ref("first_frame_image / last_frame_image 支持公网图片 URL 与 data URI 自动上传为 Creator 素材；也可直接传 first_frame_material_id / last_frame_material_id。");
     const title=computed(()=>tabs.find(t=>t.key===tab.value)?.name||"账号池");
@@ -307,7 +308,14 @@ createApp({
       const data=await api("/api/accounts",{method:"POST",body:JSON.stringify({name:name})});
       addModal.value=false;openQr(data.data);await refreshAll();
     }
-    function openQr(session){qr.open=true;qr.session_id=session.id;qr.name=session.name;qr.status=session.status;qr.text=session.message||"";startQrPolling()}
+    function openQr(session){qr.open=true;qr.session_id=session.id;qr.name=session.name;qr.status=session.status;qr.text=session.message||"";qr.mode=session.mode||"";qr.novnc_url=session.novnc_url||"";startQrPolling()}
+    function openNoVNC(url){if(url)window.open(url,"_blank","noopener")}
+    async function startMaintenance(id){
+      try{
+        const data=await api("/api/accounts/"+encodeURIComponent(id)+"/maintenance/start",{method:"POST",body:"{}"});
+        openQr(data.data);openNoVNC(data.data.novnc_url);await loadSessions();
+      }catch(e){probe.status="error";probe.message=e.message}
+    }
     async function showSession(id){const data=await api("/api/login-sessions/"+encodeURIComponent(id));openQr(data.data)}
     function startQrPolling(){
       if(qr.timer)clearInterval(qr.timer);
@@ -315,7 +323,7 @@ createApp({
         if(!qr.open||!qr.session_id)return;
         try{
           const data=await api("/api/login-sessions/"+encodeURIComponent(qr.session_id));
-          qr.status=data.data.status;qr.text=data.data.message||qr.text;
+          qr.status=data.data.status;qr.text=data.data.message||qr.text;qr.mode=data.data.mode||qr.mode;qr.novnc_url=data.data.novnc_url||qr.novnc_url;
           if(data.data.account_id){selectedId.value=data.data.account_id;await loadAccounts()}
         }catch(e){qr.text=e.message}
       },2500);
@@ -387,7 +395,7 @@ createApp({
     function shortText(value,max){value=String(value||"");return value.length>max?value.slice(0,max-1)+"…":value}
     function statusText(v){const map={valid:"可用",unknown:"未测活",invalid:"不可用",starting:"启动中",opening:"打开中",waiting_scan:"等待扫码",login_detected:"检测到登录",captured:"已捕获",capture_failed:"捕获失败",failed:"失败",expired:"已过期"};return map[v]||v||"未知"}
     onMounted(()=>{refreshAll();setInterval(()=>{if(tab.value==="logs")loadTasks();loadSessions()},5000);setInterval(()=>loadAccounts(),15000)});
-    return{tabs,tab,title,busy,accounts,sessions,tasks,models,selectedId,selectedAccount,validCount,summary,addModal,newAccount,probe,qr,test,systemNote,refreshAll,loadAccounts,selectAccount,openAdd,createAccount,showSession,clickLoginEntry,clickSessionImage,typeIntoSession,pressSessionKey,refreshSession,captureSession,deleteSession,testAccount,runTest,copy,deleteAccount,closeQr,screenshotUrl,qrPreviewUrl,shortId,shortText,statusText};
+    return{tabs,tab,title,busy,accounts,sessions,tasks,models,selectedId,selectedAccount,validCount,summary,addModal,newAccount,probe,qr,test,systemNote,refreshAll,loadAccounts,selectAccount,openAdd,createAccount,startMaintenance,openNoVNC,showSession,clickLoginEntry,clickSessionImage,typeIntoSession,pressSessionKey,refreshSession,captureSession,deleteSession,testAccount,runTest,copy,deleteAccount,closeQr,screenshotUrl,qrPreviewUrl,shortId,shortText,statusText};
   }
 }).mount("#app");
 </script>

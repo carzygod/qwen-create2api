@@ -173,6 +173,8 @@ docker run -d --name qianwen-creator-01 \
 | `DATABASE_PATH` | `./data/qianwen-creator-01.sqlite` |
 | `DEFAULT_VIDEO_MODEL` | `qianwen-creator-wan22-flash-frame` |
 | `POOL_SIZE` | `0` |
+| `BROWSER_HEADLESS` | `true` (`false` in `Dockerfile.novnc`) |
+| `NOVNC_URL` | empty |
 
 ## Protocol Notes
 
@@ -234,3 +236,14 @@ Validated on `http://150.158.144.62:18012`:
 - Historical: `qianwen-creator-wan25-i2v` first-frame image-to-video completed when using an existing Creator material id.
 - 2026-06-18: `qianwen-creator-wan22-flash-frame` first+last-frame video completed using two public image URLs. The service uploaded both images through Creator OSS and returned a playable mp4.
 - 2026-06-18 gen2api path: JP01 generated two related storyboard frames with `gpt-image-2`; SH01 submitted those images as data URIs to `qianwen-creator-wan22-flash-frame`; task `ba33dbb7-a7fd-485e-a18c-91bbe19aafd5` completed and returned a playable 5-second H.264 mp4.
+
+## 账户检修（私有 noVNC）
+
+`Dockerfile.novnc` 保留现有 API、SQLite 和账号池结构，只增加 headed Chromium 的
+交互入口。账户 profile 固定为 `DATA_DIR/account-chrome-profiles/<account-id>`；活动
+维护租约会将该账户排除出任务调度。设置 `VNC_PASSWORD` 和 `NOVNC_URL`，并且只把
+容器 `6080` 映射到宿主机 `127.0.0.1`。
+
+维护接口为 `/api/accounts/{id}/maintenance/{start|heartbeat|stop|validate}`，Cookie
+捕获沿用 `/api/login-sessions/{lease-owner}/capture`。维护会话不能刷新重建，需停止后
+重新开始，以保证 profile 与数据库租约仍由同一会话持有。

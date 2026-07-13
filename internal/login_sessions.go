@@ -49,12 +49,20 @@ type LoginSession struct {
 	CreatedAt     string `json:"created_at"`
 	UpdatedAt     string `json:"updated_at"`
 	ScreenshotURL string `json:"screenshot_url,omitempty"`
+	Mode          string `json:"mode"`
+	NoVNCURL      string `json:"novnc_url,omitempty"`
 
-	userDataDir string
-	ctx         context.Context
-	cancel      context.CancelFunc
-	screenshot  []byte
-	mu          sync.Mutex
+	userDataDir       string
+	targetAccountID   string
+	existingAccountID string
+	profilePersistent bool
+	leaseOwner        string
+	ctx               context.Context
+	cancel            context.CancelFunc
+	screenshot        []byte
+	runGeneration     uint64
+	captureMu         sync.Mutex
+	mu                sync.Mutex
 }
 
 type LoginSessionView struct {
@@ -67,11 +75,31 @@ type LoginSessionView struct {
 	CreatedAt     string `json:"created_at"`
 	UpdatedAt     string `json:"updated_at"`
 	ScreenshotURL string `json:"screenshot_url,omitempty"`
+	Mode          string `json:"mode"`
+	NoVNCURL      string `json:"novnc_url,omitempty"`
 }
 
 type LoginSessionManager struct {
 	mu       sync.Mutex
 	sessions map[string]*LoginSession
+}
+
+func (m *LoginSessionManager) register(session *LoginSession) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if Cfg.NoVNCURL != "" {
+		for _, existing := range m.sessions {
+			existing.mu.Lock()
+			status := existing.Status
+			browserActive := existing.ctx != nil
+			existing.mu.Unlock()
+			if browserActive || (status != "captured" && status != "failed" && status != "expired") {
+				return fmt.Errorf("another interactive login session is already active")
+			}
+		}
+	}
+	m.sessions[session.ID] = session
+	return nil
 }
 
 var QianwenLoginSessions = &LoginSessionManager{sessions: map[string]*LoginSession{}}
@@ -81,6 +109,7 @@ func (m *LoginSessionManager) Start(name string) (*LoginSessionView, error) {
 		name = "qianwen-login-" + time.Now().Format("20060102-150405")
 	}
 	id := uuid.New().String()
+	accountID := uuid.New().String()
 	session := &LoginSession{
 		ID:          id,
 		Name:        name,
@@ -88,12 +117,47 @@ func (m *LoginSessionManager) Start(name string) (*LoginSessionView, error) {
 		Message:     "Starting Qianwen Creator login browser.",
 		CreatedAt:   nowISO(),
 		UpdatedAt:   nowISO(),
-		userDataDir: filepath.Join(Cfg.DataDir, "login-sessions", id),
+		Mode:            "new_account",
+		NoVNCURL:        Cfg.NoVNCURL,
+		userDataDir:     accountProfilePath(accountID),
+		targetAccountID: accountID,
 	}
-	m.mu.Lock()
-	m.sessions[id] = session
-	m.mu.Unlock()
-	go session.run()
+	if err := m.register(session); err != nil {
+		return nil, err
+	}
+	session.launch()
+	return session.view(), nil
+}
+
+func (m *LoginSessionManager) StartMaintenance(accountID string) (*LoginSessionView, error) {
+	account, err := AppStore.GetAccount(strings.TrimSpace(accountID))
+	if err != nil {
+		return nil, err
+	}
+	id := uuid.New().String()
+	if _, err := AppStore.BeginAccountMaintenance(account.ID, id, defaultMaintenanceLease); err != nil {
+		return nil, err
+	}
+	session := &LoginSession{
+		ID:                id,
+		Name:              account.Name,
+		Status:            "starting",
+		Message:           "Starting account maintenance browser.",
+		CreatedAt:         nowISO(),
+		UpdatedAt:         nowISO(),
+		Mode:              "maintenance",
+		NoVNCURL:          Cfg.NoVNCURL,
+		userDataDir:       accountProfilePath(account.ID),
+		targetAccountID:   account.ID,
+		existingAccountID: account.ID,
+		profilePersistent: true,
+		leaseOwner:        id,
+	}
+	if err := m.register(session); err != nil {
+		_ = AppStore.EndAccountMaintenance(account.ID, id, err.Error())
+		return nil, err
+	}
+	session.launch()
 	return session.view(), nil
 }
 
@@ -168,6 +232,35 @@ func (m *LoginSessionManager) Delete(id string) bool {
 	return ok
 }
 
+func (m *LoginSessionManager) DeleteByAccountID(accountID string) []string {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return nil
+	}
+	type target struct {
+		id      string
+		session *LoginSession
+	}
+	targets := []target{}
+	m.mu.Lock()
+	for id, session := range m.sessions {
+		session.mu.Lock()
+		matches := session.AccountID == accountID || session.targetAccountID == accountID
+		session.mu.Unlock()
+		if matches {
+			delete(m.sessions, id)
+			targets = append(targets, target{id: id, session: session})
+		}
+	}
+	m.mu.Unlock()
+	ids := make([]string, 0, len(targets))
+	for _, item := range targets {
+		item.session.releaseBrowser()
+		ids = append(ids, item.id)
+	}
+	return ids
+}
+
 func (s *LoginSession) view() *LoginSessionView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -181,6 +274,8 @@ func (s *LoginSession) view() *LoginSessionView {
 		CreatedAt:     s.CreatedAt,
 		UpdatedAt:     s.UpdatedAt,
 		ScreenshotURL: "/api/login-sessions/" + s.ID + "/screenshot",
+		Mode:          s.Mode,
+		NoVNCURL:      s.NoVNCURL,
 	}
 }
 
@@ -204,18 +299,34 @@ func (s *LoginSession) stop() {
 }
 
 func (s *LoginSession) cleanupProfile() {
-	if s.userDataDir != "" {
-		_ = os.RemoveAll(s.userDataDir)
+	s.mu.Lock()
+	persistent := s.profilePersistent
+	profile := s.userDataDir
+	s.mu.Unlock()
+	if !persistent && profile != "" {
+		_ = os.RemoveAll(profile)
 	}
 }
 
 func (s *LoginSession) releaseBrowser() {
 	s.stop()
 	s.cleanupProfile()
+	s.mu.Lock()
+	accountID := s.existingAccountID
+	owner := s.leaseOwner
+	s.leaseOwner = ""
+	s.mu.Unlock()
+	if accountID != "" && owner != "" {
+		_ = AppStore.EndAccountMaintenance(accountID, owner, "")
+	}
 }
 
 func (s *LoginSession) Restart() error {
 	s.mu.Lock()
+	if s.Mode == "maintenance" {
+		s.mu.Unlock()
+		return fmt.Errorf("maintenance sessions cannot be refreshed; stop and start maintenance again")
+	}
 	if s.Status == "captured" {
 		s.mu.Unlock()
 		return fmt.Errorf("captured login sessions cannot be refreshed; start a new account login instead")
@@ -233,18 +344,40 @@ func (s *LoginSession) Restart() error {
 	s.UpdatedAt = nowISO()
 	s.mu.Unlock()
 
-	go s.run()
+	s.launch()
 	return nil
 }
 
-func (s *LoginSession) run() {
+func (s *LoginSession) launch() {
+	s.mu.Lock()
+	s.runGeneration++
+	generation := s.runGeneration
+	s.mu.Unlock()
+	go s.run(generation)
+}
+
+func (s *LoginSession) run(generation uint64) {
+	defer func() {
+		s.mu.Lock()
+		currentGeneration := s.runGeneration
+		s.mu.Unlock()
+		if currentGeneration == generation {
+			s.releaseBrowser()
+		}
+	}()
+	s.mu.Lock()
+	currentGeneration := s.runGeneration
+	s.mu.Unlock()
+	if currentGeneration != generation {
+		return
+	}
 	if err := os.MkdirAll(s.userDataDir, 0700); err != nil {
 		s.setStatus("failed", "Failed to create login profile directory: "+err.Error())
 		return
 	}
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", true),
+		chromedp.Flag("headless", Cfg.BrowserHeadless),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
@@ -269,6 +402,11 @@ func (s *LoginSession) run() {
 		allocCancel()
 	}
 	s.mu.Lock()
+	if s.runGeneration != generation {
+		s.mu.Unlock()
+		cancel()
+		return
+	}
 	s.ctx = ctx
 	s.cancel = cancel
 	s.mu.Unlock()
@@ -285,7 +423,6 @@ func (s *LoginSession) run() {
 		s.setStatus("failed", "Failed to open create.qianwen.com: "+err.Error())
 		return
 	}
-
 	_ = clickVisibleLogin(ctx)
 	if ctx.Err() != nil {
 		return
@@ -312,10 +449,29 @@ func (s *LoginSession) run() {
 	}
 	s.setStatus("waiting_scan", "Scan the QR code in the screenshot, then click Capture Login in Admin after the page changes to a logged-in state.")
 
+	s.mu.Lock()
+	mode := s.Mode
+	leaseOwner := s.leaseOwner
+	maintenanceAccountID := s.existingAccountID
+	s.mu.Unlock()
+
 	ticker := time.NewTicker(6 * time.Second)
-	expire := time.NewTimer(10 * time.Minute)
+	expireAfter := 10 * time.Minute
+	if mode == "maintenance" {
+		expireAfter = time.Hour
+	}
+	expire := time.NewTimer(expireAfter)
+	var heartbeat <-chan time.Time
+	var heartbeatTicker *time.Ticker
+	if leaseOwner != "" {
+		heartbeatTicker = time.NewTicker(5 * time.Minute)
+		heartbeat = heartbeatTicker.C
+	}
 	defer ticker.Stop()
 	defer expire.Stop()
+	if heartbeatTicker != nil {
+		defer heartbeatTicker.Stop()
+	}
 
 	for {
 		select {
@@ -328,16 +484,25 @@ func (s *LoginSession) run() {
 			alreadyCaptured := s.AccountID != ""
 			if s.Status != "captured" && likelyLogin {
 				s.Status = "login_detected"
-				s.Message = "Browser cookies detected after QR scan. Capturing account material automatically."
+				if mode == "maintenance" {
+					s.Message = "Browser cookies detected. Confirm capture when the account is ready."
+				} else {
+					s.Message = "Browser cookies detected after QR scan. Capturing account material automatically."
+				}
 			}
 			if s.Status != "captured" && !alreadyCaptured {
 				s.UpdatedAt = nowISO()
 			}
 			s.mu.Unlock()
-			if count > 0 && !alreadyCaptured && likelyLogin {
+			if count > 0 && !alreadyCaptured && likelyLogin && mode != "maintenance" {
 				if _, err := s.CaptureAccount(); err != nil {
 					s.setStatus("capture_failed", "Detected cookies, but failed to capture account: "+err.Error())
 				}
+			}
+		case <-heartbeat:
+			if _, err := AppStore.HeartbeatAccountMaintenance(maintenanceAccountID, leaseOwner, defaultMaintenanceLease); err != nil {
+				s.setStatus("failed", "Maintenance lease heartbeat failed: "+err.Error())
+				return
 			}
 		case <-expire.C:
 			s.setStatus("expired", "Login session expired. Start a new QR login session.")
@@ -622,12 +787,18 @@ func contentTypeForImage(imageBytes []byte) string {
 }
 
 func (s *LoginSession) CaptureAccount() (*AccountRecord, error) {
+	s.captureMu.Lock()
+	defer s.captureMu.Unlock()
 	s.mu.Lock()
 	ctx := s.ctx
-	existingAccountID := s.AccountID
+	existingAccountID := s.existingAccountID
+	targetAccountID := s.targetAccountID
+	leaseOwner := s.leaseOwner
 	s.mu.Unlock()
-	if existingAccountID != "" {
-		return AppStore.GetAccount(existingAccountID)
+	if existingAccountID != "" && leaseOwner != "" {
+		if _, err := AppStore.HeartbeatAccountMaintenance(existingAccountID, leaseOwner, defaultMaintenanceLease); err != nil {
+			return nil, err
+		}
 	}
 
 	cookies, source, err := s.captureLoginCookies()
@@ -649,6 +820,7 @@ func (s *LoginSession) CaptureAccount() (*AccountRecord, error) {
 	}
 
 	account := &AccountRecord{
+		ID:               targetAccountID,
 		Name:             s.Name,
 		Type:             "qianwen_qr",
 		Status:           "unknown",
@@ -660,7 +832,18 @@ func (s *LoginSession) CaptureAccount() (*AccountRecord, error) {
 		CapabilitiesJSON: `{"chat":true,"image":true,"video":true}`,
 		LastError:        "QR login cookies captured from " + source + ". Real model probe is still required before this account is marked valid.",
 	}
-	if err := AppStore.CreateAccount(account); err != nil {
+	if existingAccountID != "" {
+		if _, err := AppStore.HeartbeatAccountMaintenance(existingAccountID, leaseOwner, defaultMaintenanceLease); err != nil {
+			return nil, err
+		}
+		if err := AppStore.UpdateAccountSessionSnapshot(existingAccountID, cookieJSON, cookieString, localStorageJSON, userAgent); err != nil {
+			return nil, err
+		}
+		account, err = AppStore.GetAccount(existingAccountID)
+		if err != nil {
+			return nil, err
+		}
+	} else if err := AppStore.CreateAccount(account); err != nil {
 		return nil, err
 	}
 
@@ -668,6 +851,7 @@ func (s *LoginSession) CaptureAccount() (*AccountRecord, error) {
 	s.Status = "captured"
 	s.Message = "Captured browser cookies from " + source + " into account pool. Run a real model test before routing traffic to this account."
 	s.AccountID = account.ID
+	s.profilePersistent = true
 	s.CookieCount = len(cookies)
 	s.UpdatedAt = nowISO()
 	s.mu.Unlock()

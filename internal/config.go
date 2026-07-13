@@ -25,6 +25,8 @@ type Config struct {
 	DefaultChatModel  string
 	DefaultImageModel string
 	DefaultVideoModel string
+	BrowserHeadless   bool
+	NoVNCURL          string
 }
 
 var Cfg *Config
@@ -93,6 +95,8 @@ func LoadConfig() {
 	if defaultVideoModel == "" {
 		defaultVideoModel = QianwenVideoModelID
 	}
+	browserHeadless := strings.ToLower(strings.TrimSpace(os.Getenv("BROWSER_HEADLESS"))) != "false"
+	noVNCURL := strings.TrimSpace(os.Getenv("NOVNC_URL"))
 
 	Cfg = &Config{
 		Host:              host,
@@ -108,6 +112,8 @@ func LoadConfig() {
 		DefaultChatModel:  defaultChatModel,
 		DefaultImageModel: defaultImageModel,
 		DefaultVideoModel: defaultVideoModel,
+		BrowserHeadless:   browserHeadless,
+		NoVNCURL:          noVNCURL,
 	}
 }
 

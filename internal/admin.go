@@ -168,6 +168,7 @@ func handleAccountAction(w http.ResponseWriter, r *http.Request, suffix string) 
 			}
 			writeJSON(w, http.StatusOK, map[string]interface{}{"data": maskAccount(*account)})
 		case http.MethodDelete:
+			QianwenLoginSessions.DeleteByAccountID(id)
 			if err := AppStore.DeleteAccount(id); err != nil {
 				writeAPIError(w, http.StatusInternalServerError, "account_delete_failed", err.Error())
 				return
@@ -176,6 +177,10 @@ func handleAccountAction(w http.ResponseWriter, r *http.Request, suffix string) 
 		default:
 			writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
 		}
+		return
+	}
+	if len(parts) >= 2 && parts[1] == "maintenance" {
+		handleAccountMaintenanceAction(w, r, id, parts[2:])
 		return
 	}
 	if len(parts) == 2 && parts[1] == "test" && r.Method == http.MethodPost {
@@ -206,6 +211,102 @@ func handleAccountAction(w http.ResponseWriter, r *http.Request, suffix string) 
 		return
 	}
 	writeAPIError(w, http.StatusNotFound, "account_route_not_found", "Account route not found.")
+}
+
+func handleAccountMaintenanceAction(w http.ResponseWriter, r *http.Request, accountID string, parts []string) {
+	action := "status"
+	if len(parts) > 0 && parts[0] != "" {
+		action = parts[0]
+	}
+	switch action {
+	case "status":
+		if r.Method != http.MethodGet {
+			writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Use GET for maintenance status.")
+			return
+		}
+		record, err := AppStore.GetAccountMaintenance(accountID)
+		if err != nil {
+			writeAccountLookupError(w, err)
+			return
+		}
+		if account, accountErr := AppStore.GetAccount(accountID); accountErr == nil && record.State == "active" && account.Status == "maintenance_pending_validation" {
+			record.State = "validating"
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"data": record})
+	case "start":
+		if r.Method != http.MethodPost {
+			writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Use POST to start maintenance.")
+			return
+		}
+		session, err := QianwenLoginSessions.StartMaintenance(accountID)
+		if err != nil {
+			writeAPIError(w, http.StatusConflict, "maintenance_start_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]interface{}{"data": session})
+	case "heartbeat":
+		if r.Method != http.MethodPost {
+			writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Use POST for maintenance heartbeat.")
+			return
+		}
+		var body struct{ LeaseOwner string `json:"lease_owner"` }
+		if err := decodeJSON(r, &body); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid_json", err.Error())
+			return
+		}
+		record, err := AppStore.HeartbeatAccountMaintenance(accountID, body.LeaseOwner, defaultMaintenanceLease)
+		if err != nil {
+			writeAPIError(w, http.StatusConflict, "maintenance_heartbeat_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"data": record})
+	case "stop":
+		if r.Method != http.MethodPost {
+			writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Use POST to stop maintenance.")
+			return
+		}
+		record, err := AppStore.GetAccountMaintenance(accountID)
+		if err != nil {
+			writeAccountLookupError(w, err)
+			return
+		}
+		if record.LeaseOwner != "" && QianwenLoginSessions.Delete(record.LeaseOwner) {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "state": "active"})
+			return
+		}
+		if record.LeaseOwner != "" {
+			writeAPIError(w, http.StatusConflict, "maintenance_owned_elsewhere", "The active maintenance lease is owned by another process.")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "state": "active"})
+	case "validate":
+		if r.Method != http.MethodPost {
+			writeAPIError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Use POST to validate maintenance.")
+			return
+		}
+		active, err := AppStore.IsAccountInMaintenance(accountID)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "maintenance_status_failed", err.Error())
+			return
+		}
+		if active {
+			writeAPIError(w, http.StatusConflict, "maintenance_active", "Stop the maintenance browser before validation.")
+			return
+		}
+		result, err := TestAccount(accountID, "")
+		if err != nil {
+			writeAccountLookupError(w, err)
+			return
+		}
+		if !result.OK {
+			_ = AppStore.UpdateAccountStatus(accountID, "maintenance_pending_validation", result.Message, false)
+			writeJSON(w, http.StatusFailedDependency, result)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+	default:
+		writeAPIError(w, http.StatusNotFound, "maintenance_action_not_found", "Unknown maintenance action.")
+	}
 }
 
 func handleListTasks(w http.ResponseWriter, r *http.Request) {
@@ -657,7 +758,7 @@ const legacyAdminHTML = `<!doctype html>
           '<td>' + status(a.status) + '</td>' +
           '<td><code>' + esc(a.capabilities_json || '') + '</code></td>' +
           '<td>' + esc(a.last_error || '') + '</td>' +
-          '<td><div class="inline-actions"><button onclick="testAccount(\'' + escAttr(a.id) + '\')">Test</button><button class="danger" onclick="deleteAccount(\'' + escAttr(a.id) + '\')">Delete</button></div></td></tr>';
+          '<td><div class="inline-actions"><button onclick="startMaintenance(\'' + escAttr(a.id) + '\')">Maintain</button><button onclick="testAccount(\'' + escAttr(a.id) + '\')">Test</button><button class="danger" onclick="deleteAccount(\'' + escAttr(a.id) + '\')">Delete</button></div></td></tr>';
       }).join('');
     }
     async function loadLoginSessions() {
@@ -672,7 +773,7 @@ const legacyAdminHTML = `<!doctype html>
           '<td>' + status(s.status) + '</td>' +
           '<td>' + esc(s.cookie_count || 0) + '</td>' +
           '<td>' + esc(s.message || '') + '</td>' +
-          '<td><div class="inline-actions"><button onclick="showLoginSession(\'' + escAttr(s.id) + '\')">Open</button><button onclick="refreshLoginSession(\'' + escAttr(s.id) + '\')">Refresh QR</button><button onclick="captureLoginSession(\'' + escAttr(s.id) + '\')">Confirm</button><button class="danger" onclick="deleteLoginSession(\'' + escAttr(s.id) + '\')">Delete</button></div></td></tr>';
+          '<td><div class="inline-actions"><button onclick="showLoginSession(\'' + escAttr(s.id) + '\')">Open</button>' + (s.novnc_url ? '<button onclick="openNoVNC(\'' + escAttr(s.novnc_url) + '\')">noVNC</button>' : '') + '<button onclick="refreshLoginSession(\'' + escAttr(s.id) + '\')">Refresh QR</button><button onclick="captureLoginSession(\'' + escAttr(s.id) + '\')">Confirm</button><button class="danger" onclick="deleteLoginSession(\'' + escAttr(s.id) + '\')">Delete</button></div></td></tr>';
       }).join('');
     }
     async function loadTasks() {
@@ -689,6 +790,19 @@ const legacyAdminHTML = `<!doctype html>
     async function showLoginSession(id) {
       const data = await api('/login-sessions/' + encodeURIComponent(id));
       showLoginDialog(data.data);
+    }
+    function openNoVNC(url) {
+      if (url) window.open(url, '_blank', 'noopener');
+    }
+    async function startMaintenance(id) {
+      try {
+        const result = await api('/accounts/' + encodeURIComponent(id) + '/maintenance/start', { method: 'POST' });
+        showLoginDialog(result.data);
+        openNoVNC(result.data.novnc_url);
+      } catch (err) {
+        toastMessage(err.message);
+      }
+      await loadAll();
     }
     function showLoginDialog(session) {
       currentLoginSessionId = session.id;
