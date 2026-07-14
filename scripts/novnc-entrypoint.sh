@@ -23,7 +23,7 @@ fluxbox >/tmp/qianwen-novnc/fluxbox.log 2>&1 &
 FLUXBOX_PID=$!
 
 x11vnc -storepasswd "$VNC_PASSWORD" /tmp/qianwen-novnc/vnc.pass >/dev/null
-x11vnc -display "$DISPLAY" -forever -nevershared -localhost -nofilexfer -norepeat \
+x11vnc -display "$DISPLAY" -forever -nevershared -localhost -norepeat \
   -rfbport "$VNC_PORT" -rfbauth /tmp/qianwen-novnc/vnc.pass \
   >/tmp/qianwen-novnc/x11vnc.log 2>&1 &
 VNC_PID=$!
